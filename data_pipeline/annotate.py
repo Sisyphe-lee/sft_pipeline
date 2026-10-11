@@ -25,7 +25,7 @@ import rollout  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULTS = dict(patterns=[], readings=["timeline", "ideas", "surprises"], per_url=2, window_chars=150000,
-                read_max_tokens=40000, judge_max_tokens=30000, render_cap=3000)
+                read_max_tokens=60000, judge_max_tokens=30000, render_cap=3000)
 
 
 def load_config(path):
@@ -114,7 +114,9 @@ def main():
     labels = args.data / "labels.jsonl"
     if labels.exists():
         labels.replace(args.data / f"labels.before-{time.strftime('%Y%m%d-%H%M%S')}.jsonl")
-    label.labels(argparse.Namespace(dirs=[str(d) for d in dirs], out=str(labels)))
+    # every rollout labelled so far, not only the ones this run touched (--only, or a capture directory given alone)
+    done = sorted(d for d in work.iterdir() if (d / "places.json").exists())
+    label.labels(argparse.Namespace(dirs=[str(d) for d in done], out=str(labels)))
     print(f"labels: {labels}")
 
 

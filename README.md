@@ -92,8 +92,10 @@ Kimi 地址从环境变量 `KIMI_URLS`（空格分隔，以 `/v1` 结尾）读�
 
 ## 现状（2026-10-11）
 
-- 标注和选数据在一条 Kimi rollout 上整条跑通（212 步，159 个问题约 12 分钟，56 个标签覆盖 101 步）；
-  改程序规则不重问、改一个 pattern 的题目只重问这一个，都实测过。还没在多条、带上下文压缩的 rollout 上跑。
+- 标注和选数据在 4 条 9 月的 Kimi rollout 上整条跑通（共 1602 步，含一条游戏类和一条发生过上下文压缩的）：
+  348 个标签覆盖 602 步。改程序规则不重问、改一个 pattern 的题目只重问这一个，都实测过。
+- 速度：一条 300–500 步的 rollout 约 40–100 分钟，大半花在三遍通读上（每遍一个整条日志的请求，5–14 分钟）。
+  多条 rollout 要放在一条命令里一起跑，才能用满并发。
 - 训练：`training/`、`jobs/`、`configs/recipes`、`configs/training` 是从 physicalagent-sft-pipeline
   （分支 `feat/flashnext-sft`，提交 `dc7854c`）原样复制的，还没去掉图像和机器人相关的部分，目前不能运行。
 - 2026 年 9 月的 Kimi rollout 只能用来调流程，不能用来训练：那批数据里模型几乎不思考（见 EdgeBench `docs/kimi-serving.md`）。
