@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""标注：抓包 -> 训练行 -> Kimi 标注 -> 标签文件。离线做一次，之后选数据时反复使用。
+
+    python3 data_pipeline/annotate.py --config configs/labelling/kimi_v1.yaml \\
+        --capture CAPTURE_DIR [CAPTURE_DIR ...] --runs RUNS_DIR --tasks TASKS_DIR --data DATA_DIR
+
+写出 DATA_DIR/rows/（训练行）和 DATA_DIR/labels-<说明指纹>.jsonl（标签）。已完成的部分会跳过：
+中断后重跑同一条命令即可，新增 rollout 时只标新增的。选数据见 select_rows.py。
+"""
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import export_capture  # noqa: E402
+import label  # noqa: E402
+import rollout  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[1]
+DEFAULTS = dict(sheet="patterns/label-sheet.md", readings=["timeline", "ideas", "surprises"], per_url=2, window_chars=150000,
+                read_max_tokens=40000, judge_max_tokens=30000, render_cap=3000)
+
+
+def load_config(path):
+    given = yaml.safe_load(Path(path).read_text()) or {}
+    if given.keys() - DEFAULTS.keys():
+        raise ValueError(f"unknown config keys: {sorted(given.keys() - DEFAULTS.keys())}")
+    return dict(DEFAULTS, **given)
+
+
+def kimi_urls():
+    if os.environ.get("KIMI_URLS"):
+        return os.environ["KIMI_URLS"].split()
+    out = subprocess.run(["bash", "-c", "source /personal/kimi.env && echo $KIMI_BASE_URL_1 $KIMI_BASE_URL_2 $KIMI_BASE_URL_3 $KIMI_BASE_URL_4"],
+                         capture_output=True, text=True).stdout.split()
+    if not out:
+        sys.exit("no labelling endpoint: set KIMI_URLS or provide /personal/kimi.env")
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config", required=True, type=Path, help="configs/labelling/*.yaml")
+    parser.add_argument("--capture", nargs="+", required=True, help="bridge capture directories (resp_<id>/...)")
+    parser.add_argument("--runs", required=True, type=Path, help="harness run directories: RUNS/<trajectory id>/<task>/")
+    parser.add_argument("--tasks", type=Path, help="EdgeBench task specifications (<task>.json), for the score direction")
+    parser.add_argument("--data", required=True, type=Path, help="data directory: rows/, work/ and labels-*.jsonl are written here")
+    parser.add_argument("--only", help="use only rollouts whose capture id contains this text")
+    args = parser.parse_args()
+    lab = load_config(args.config)
+    rows_dir, work = args.data / "rows", args.data / "work"
+    rows_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. export: one row per model reply
+    names = []
+    for ident, exchanges in sorted(export_capture.scan(args.capture, args.only).items()):
+        task, run = export_capture.identity(ident)
+        names.append((task, run))
+        if not (rows_dir / f"{run}.jsonl").exists():
+            print("export", json.dumps(export_capture.export(ident, exchanges, rows_dir), ensure_ascii=False), flush=True)
+    # 2. render: numbered steps and the places a rule finds
+    for task, run in names:
+        if not (work / run / "points.json").exists():
+            run_dir = args.runs / run / task
+            r = rollout.Rollout(rows_dir / f"{run}.jsonl", run_dir if run_dir.is_dir() else None, args.tasks)
+            r.render(work / run, lab["render_cap"])
+            print(f"render {run}: {len(r.steps)} steps, {len(r.subs)} judged rounds" + ("" if run_dir.is_dir() else " (no run directory found)"), flush=True)
+    dirs = [work / run for _, run in names]
+    # 3. readings and 4. places: the labelling model reports where to look
+    urls = kimi_urls()
+    todo, lock = list(dirs), threading.Lock()
+
+    def reader(url):
+        while True:
+            with lock:
+                if not todo:
+                    return
+                d = todo.pop(0)
+            for k, name in enumerate(lab["readings"]):
+                label.read(argparse.Namespace(dir=str(d), protocol=str(REPO / f"patterns/{name}-protocol.md"), url=url, name=name,
+                                              max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}", force=False,
+                                              segment_chars=1200000, context=f"{lab['readings'][0]}.json" if k else None))
+            if not (d / "places.json").exists():
+                label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in lab["readings"][1:] + lab["readings"][:1]], batch=1))
+
+    threads = [threading.Thread(target=reader, args=(u,)) for u in urls for _ in range(lab["per_url"])]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # 5. label: the model answers the sheet's questions for every place; label.py decides
+    sheet = REPO / lab["sheet"]
+    version = hashlib.sha256(sheet.read_bytes()).hexdigest()[:8]
+    label.judge(argparse.Namespace(dirs=[str(d) for d in dirs], sheet=[str(sheet)], url=urls, per_url=lab["per_url"], name=f"judged-{version}",
+                                   packets="packets", timeline=f"{lab['readings'][0]}.json", window_chars=lab["window_chars"],
+                                   max_tokens=lab["judge_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}"))
+    labels = args.data / f"labels-{version}.jsonl"
+    label.labels(argparse.Namespace(dirs=[str(d) for d in dirs], name=f"judged-{version}", out=str(labels)))
+    print(f"labels: {labels}")
+
+
+if __name__ == "__main__":
+    main()

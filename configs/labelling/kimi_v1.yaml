@@ -1,0 +1,4 @@
+# Kimi 标注的设置。改了 sheet 的内容会重新标注（结果按说明的内容指纹分开存放）。
+sheet: patterns/label-sheet.md              # 标注说明：12 个 pattern 的是非题
+readings: [timeline, ideas, surprises]      # 通读几遍、各用哪份 patterns/<name>-protocol.md；第一遍的结果给后面几遍参考
+per_url: 2                                  # 每个 Kimi 地址的并发请求数

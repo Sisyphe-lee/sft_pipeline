@@ -1,8 +1,4 @@
-# 对照组：同一批 rollout，每条随机抽和实验组同样多的步。标注结果与 pattern_all.yaml 共用，不会重标。
+# 对照组：同一批 rollout，每条随机抽和实验组同样多的步。
 arm: random_matched
 patterns: []
 seed: 0
-labelling:
-  sheet: patterns/label-sheet.md
-  readings: [timeline, ideas, surprises]
-  per_url: 2

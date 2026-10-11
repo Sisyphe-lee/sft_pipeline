@@ -3,9 +3,11 @@
 - Read `README.md` first: it lists the stages, the command of each and its arguments. Keep it current when a
   command or an argument changes. Rollouts, the bridge and evaluation are in the EdgeBench repository
   (`/ssd0/foke/EdgeBench`, branch `lcy-dev`); do not copy them here.
-- Cleaning has one entry, `data_pipeline/clean.py --policy configs/data_policies/<x>.yaml ...`. What differs between
-  cleaning runs goes into the policy file, not into new scripts or flags. The other modules in `data_pipeline/` are
-  its steps (export, render, label, select). Step N of a transcript is row N of the export; never renumber steps.
+- Two entries. `data_pipeline/annotate.py --config configs/labelling/<x>.yaml` is the offline labelling by the served
+  model; it is done once per rollout and its label files are reused. `data_pipeline/select_rows.py --policy
+  configs/data_policies/<x>.yaml` turns labels into a manifest without calling a model. What differs between
+  selections goes into the policy file, not into new scripts or flags. Selecting must never trigger labelling.
+  Step N of a transcript is row N of the export; never renumber steps.
 - The README is in Chinese and short: what the stages are, the one command, its arguments, the policy keys.
 - One row is one model reply. Export keeps every reply; selection only writes manifests and never copies or edits rows.
 - A label is binary. Change what counts as a pattern in `patterns/label-sheet.md` and `EVIDENCE` in
