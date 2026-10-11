@@ -1,20 +1,20 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: A3
 title: Ask the judge with a probe submission
 places:
 - probe
 - result
 questions:
-- id: judge_only_fact
+- id: fact_about_judge
   expect: true
-  text: there is an open question that only the judge can answer. A question that a local run, a local server or the files can answer is not one.
-- id: step_on_known_trend
+  text: before the submission there is an open question about the judge itself, how a sub-score is computed, what the hidden data or the judge's machine is like, where a limit lies, how noisy the score is, why the judge and a local run disagree. Whether a new version of the solution scores higher is not such a question, also when the judge is the only place where it can be measured.
+- id: candidate
   expect: false
-  text: the submission is the next step along a trend the judge has already shown (one more value in the same direction).
+  text: the submitted version is the agent's next attempt at a higher score, a tuned value, a new variant or an optimisation that it would keep if the score rose.
 - id: question_before
   expect: true
-  text: the agent says what it wants to learn before it submits.
+  text: the agent says what it wants to learn about the judge before it submits.
 - id: answer_used
   expect: true
   text: it reads the answer and its next decision follows from it.

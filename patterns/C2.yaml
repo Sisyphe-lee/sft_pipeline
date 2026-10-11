@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: C2
 title: A small trial before something expensive
 places:
@@ -7,23 +7,24 @@ places:
 questions:
 - id: costly
   expect: true
-  text: the thing started runs five minutes or more, or is a large implementation resting on an unchecked idea. A submission is not such a start.
+  text: the thing started keeps the agent waiting five minutes or more of wall time (runs in parallel are not added up, and a time limit is not the duration when the run ends earlier), or is a large implementation resting on an unchecked idea. A submission, an evaluation it repeats after each change, and a run started to watch and debug are not such starts.
 - id: small_version_first
   expect: true
-  text: before it, the agent ran a smaller version of this same thing (a short run, a small input, a timing measurement, a tiny case against a known answer). An earlier experiment with another purpose is not a trial of this one.
+  text: before it, the agent ran a smaller version of this same thing, the launch's own code or procedure at a smaller setting (a short run, a small input, a timing measurement, a tiny case against a known answer), or a test of its central idea. An earlier experiment with another purpose is not a trial of this one, nor is a run whose failure is the reason for starting the larger one.
 - id: trial_can_tell
   expect: true
   text: the trial could have shown that the idea or the run would fail. A syntax or import check cannot.
 - id: trial_result_used
   expect: true
-  text: the result is what the agent goes ahead, adjusts or cancels by.
+  text: the agent refers to the trial's result when it launches, and goes ahead, adjusts or cancels by it.
 steps:
 - id: trial_step
   run: true
   then: <
 - id: launch_step
   run: true
+  within: 6
 span:
-  from: trial_step
-  to: launch_step
-  max: 6
+  steps:
+  - trial_step
+  - launch_step

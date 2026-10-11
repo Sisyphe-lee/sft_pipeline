@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: D4
 title: Leave a direction that failed twice
 places:
@@ -7,23 +7,24 @@ places:
 questions:
 - id: same_direction_twice
   expect: true
-  text: one direction or premise that you can name had at least two attempts without improvement by this step.
+  text: one direction or premise that you can name had at least two attempts without improvement by this step, each a chosen way to improve the result. Two bugs or errors of a similar kind are not a direction, and a failure in a run of outdated code is not an attempt.
 - id: results_moving
   expect: false
   text: each attempt was guided by new evidence and the results were improving.
 - id: more_than_one_further
   expect: false
-  text: after this step the agent makes two or more further attempts in the direction.
+  text: after the leave step the agent makes two or more further attempts (submissions or local trials) in the direction or resting on the premise, anywhere later in the run. When later steps are not shown and TIMELINE does not settle it, answer true.
 - id: came_back_later
   expect: false
-  text: it returns to the direction later without new evidence.
+  text: it returns to the direction later without new evidence. When later steps are not shown and TIMELINE does not settle it, answer true.
 steps:
 - id: first_failure_step
   then: <
 - id: second_failure_step
   then: <=
 - id: leave_step
-  text: the first step of the other work
+  within: 25
+  text: the first step of the other work after the agent's last attempt in the direction. It may be the step that reads the second failure. A step that only says it will leave does not count
 span:
   from: leave_step
   to: leave_step

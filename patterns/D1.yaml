@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: D1
 title: On leaving a direction, gather new evidence first
 places:
@@ -7,7 +7,7 @@ places:
 questions:
 - id: left_direction
   expect: true
-  text: a direction failed at least twice and the agent leaves it for good.
+  text: a direction failed at least twice and the agent leaves it for good. The leave step is the last time it drops the direction; a step after which it returns to the direction is not the leave.
 - id: new_kind_of_evidence
   expect: true
   text: 'the first thing after leaving is a command that gets a kind of evidence it had not used so far: single cases, a profile, the task or scoring text, a probe of the judge, a test of why the direction failed.'
@@ -19,9 +19,10 @@ steps:
   then: <=
 - id: evidence_step
   run: true
+  within: 2
   then: <=
 - id: finding_step
 span:
   from: evidence_step
   to: finding_step
-  max: 6
+  max: 4

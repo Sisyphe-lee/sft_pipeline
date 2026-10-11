@@ -27,8 +27,10 @@ def load_patterns(directory=PATTERN_DIR):
     """(shared instructions, {name: pattern}). A pattern is one YAML file: the place types where it is looked for, its
     yes/no questions with the answer the behaviour needs, its steps in order, and which of the steps carry the label
     (`span`). `sha` is the fingerprint of what the model reads (the shared instructions and this pattern's questions,
-    steps and notes): editing those asks the model again, for this pattern only. `run`, `submit` and `span` are applied
-    by the program when labels are collected, so changing them needs no new answers."""
+    steps and notes): editing those asks the model again, for this pattern only. `submit`, `within` and `apart` (a step lies
+    at most, or at least, that many steps after the one before it) and `span` (`from`/`to`/`max`: the steps between two named steps, dropped
+    when longer than `max`; or `steps`: just the named steps) are applied by the program when labels are collected, so
+    changing them needs no new answers."""
     import yaml
     common = (directory / "common.md").read_text()
     patterns = {}
@@ -69,9 +71,17 @@ def decide(pattern, row, kinds, submits):
         else:
             gaps.append(f"{step['id']} missing")
     for a, b in zip(pattern["steps"], pattern["steps"][1:]):
-        if a["id"] in given and b["id"] in given and not (given[a["id"]] < given[b["id"]] if a["then"] == "<" else given[a["id"]] <= given[b["id"]]):
-            gaps.append(f"{a['id']} not {a['then']} {b['id']}")
+        if a["id"] in given and b["id"] in given:
+            if not (given[a["id"]] < given[b["id"]] if a["then"] == "<" else given[a["id"]] <= given[b["id"]]):
+                gaps.append(f"{a['id']} not {a['then']} {b['id']}")
+            elif b.get("within") and given[b["id"]] - given[a["id"]] > b["within"]:
+                gaps.append(f"{b['id']} more than {b['within']} steps after {a['id']}")  # too far apart to be one piece of behaviour
+            elif b.get("apart") and given[b["id"]] - given[a["id"]] < b["apart"]:
+                gaps.append(f"{b['id']} less than {b['apart']} steps after {a['id']}")  # too close: the behaviour needs time in between
     span = pattern["span"]
+    if "steps" in span:  # the named steps themselves carry the label, not what lies between them
+        marked = [given.get(name) for name in span["steps"]]
+        return ([] if gaps or None in marked else sorted(set(marked))), gaps
     lo, hi = given.get(span["from"]), given.get(span["to"])
     if lo is not None and hi is not None and hi - lo + 1 > span["max"]:
         gaps.append(f"more than {span['max']} steps from {span['from']} to {span['to']}")  # too long to be this behaviour and little else
@@ -223,6 +233,25 @@ def window(body, lo, hi, limit):
     return starts[a][0], starts[b][0], body[pos[a]:pos[b + 1]]
 
 
+def looked_for(patterns):
+    """{place type: [pattern names]} by the current pattern files."""
+    at = {}
+    for name, pattern in patterns.items():
+        for kind in pattern["places"]:
+            at.setdefault(kind, []).append(name)
+    return at
+
+
+def answer_of(out, place, pattern):
+    """The stored answer for this place and this version of the pattern, or None. An answer records the place it was
+    given for; one that was given for another place (places found anew after a change of the rules) does not count."""
+    path = out / "labels" / f"{pattern['name']}-{pattern['sha']}" / f"{place['id']}.json"
+    if not path.exists():
+        return None
+    row = json.loads(path.read_text())
+    return row if row.get("at", [place["type"], place["step"]]) == [place["type"], place["step"]] else None
+
+
 def judge(args):
     """Ask the served model about every (place, pattern) of rendered rollouts that has no answer yet for the pattern's
     current version. One request holds the shared instructions, the head, the other reader's account, the steps around
@@ -235,12 +264,12 @@ def judge(args):
     for u in urls:
         with urllib.request.urlopen(u + "/models", timeout=30) as resp:
             models[u] = json.load(resp)["data"][0]["id"]
-    jobs = []
+    jobs, at = [], looked_for(patterns)
     for d in args.dirs:
         out = Path(d)
         for place in json.loads((out / "places.json").read_text()):
-            for name in place["patterns"]:
-                if name in wanted and name in patterns and not (out / "labels" / f"{name}-{patterns[name]['sha']}" / f"{place['id']}.json").exists():
+            for name in at.get(place["type"], ()):
+                if name in wanted and answer_of(out, place, patterns[name]) is None:
                     jobs.append((out, place, patterns[name]))
     print(f"{len(jobs)} questions to ask on {len(urls)} URLs x {args.per_url}", flush=True)
     lock, busy, shared = threading.Lock(), {}, {}
@@ -286,7 +315,7 @@ def judge(args):
                     raise ValueError(f"answer cut at max_tokens; next attempt gets {limit}")
                 row = parse_json(msg.get("content") or "")
                 gaps = decide(pattern, row, m["kinds"], m["submits"])[1]  # for the log only; labels() decides again from the stored answer
-                record = dict(place=place["id"], pattern=pattern["name"], sha=pattern["sha"],
+                record = dict(place=place["id"], at=[place["type"], place["step"]], pattern=pattern["name"], sha=pattern["sha"],
                               answers=row.get("answers"), steps=row.get("steps"), why=row.get("why"), quote=row.get("quote"),
                               **{k: row[k] for k in ("source", "file") if k in row},
                               meta=dict(model=meta["model"], url=base, seconds=meta["seconds"], usage=meta["usage"], attempt=attempt, steps_shown=[lo, hi]),
@@ -371,8 +400,12 @@ def places(args):
             continue
         rows.append(dict(src="reader", type=m["type"], step=step, steps=[min(lo, step), max(hi, step)], patterns=at[m["type"]], facts=facts))
     rows.sort(key=lambda x: (x["step"], x["src"] != "rule"))
-    for k, row in enumerate(rows, 1):
-        row["id"] = f"m{k:03d}"
+    taken = set()
+    for row in rows:  # the id says what the place is, so it stays the same when other places come or go
+        row["id"] = f"{row['type']}-{row['step']:04d}"
+        while row["id"] in taken:
+            row["id"] += "b"
+        taken.add(row["id"])
     (out / "places.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1))
     kinds = {}
     for row in rows:
@@ -391,16 +424,13 @@ def labels(args):
             body = (out / "transcript.txt").read_text().partition("\n" + "=" * 100 + "\n")[2]
             kinds = {int(n): kind for n, kind in re.findall(r"^#(\d+) \S+ ([A-Z]+)", body, re.M)}
             submits = [x["step"] for x in points["points"] if x["kind"] == "submit"]
-            seen = set()
+            seen, at = set(), looked_for(patterns)
             for place in json.loads((out / "places.json").read_text()):
-                for name in place["patterns"]:
-                    if name not in patterns:
-                        continue
-                    path = out / "labels" / f"{name}-{patterns[name]['sha']}" / f"{place['id']}.json"
-                    if not path.exists():
+                for name in at.get(place["type"], ()):
+                    row = answer_of(out, place, patterns[name])
+                    if row is None:
                         missing += 1
                         continue
-                    row = json.loads(path.read_text())
                     steps, _ = decide(patterns[name], row, kinds, submits)
                     if not steps or (name, steps[0], steps[-1]) in seen:  # the same steps are often reached from two places
                         continue

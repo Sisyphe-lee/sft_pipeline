@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: D3
 title: Keep a record of what was tried, and look back at it
 places:
@@ -9,10 +9,10 @@ places:
 questions:
 - id: record_file
   expect: true
-  text: 'there is a file that holds results of earlier experiments: what was tried and the number or outcome it gave. A notes file, a results table and a log that the agent''s scripts append to all count. The judge''s submission list and plain copies of versions do not.'
-- id: read_back_later
+  text: 'there is a file the agent keeps across experiments: it holds entries from at least two separate experiments, each saying what was tried and the number or outcome it gave. The output, log or saved result of a single run does not count, nor do the judge''s submission list and plain copies of versions.'
+- id: older_results
   expect: true
-  text: in a later command the agent reads that file to see results of earlier experiments. Looking at the output of the run it has just made is not a look back.
+  text: in a later command the agent reads that file, and what it reads are results older than the run it has just made, with at least one other experiment between the writing and the reading.
 - id: read_feeds_decision
   expect: true
   text: what it read is used in the choice of what to do next.

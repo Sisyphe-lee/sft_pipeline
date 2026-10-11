@@ -47,13 +47,10 @@ def text_of(content):
 
 def command(call):
     function = call.get("function") or {}
-    try:
-        args = json.loads(function.get("arguments") or "{}")
-    except ValueError:
-        args = {}
-    if function.get("name") == "exec_command" and isinstance(args, dict) and "cmd" in args:
+    args = function.get("arguments") or {}
+    if function.get("name") == "exec_command" and "cmd" in args:
         return str(args["cmd"])
-    return f"[{function.get('name')}] " + (function.get("arguments") or "")
+    return f"[{function.get('name')}] " + (args["_unparsed"] if "_unparsed" in args else json.dumps(args, ensure_ascii=False))
 
 
 class Rollout:
@@ -62,7 +59,7 @@ class Rollout:
         with open(rows_path, encoding="utf-8") as stream:
             for line in stream:
                 row = json.loads(line)
-                prompt, meta, reply = row["prompt"], row["metadata"], row["completion"]
+                prompt, meta, reply = row["prompt"], row["metadata"], row["completion"][0]
                 last = max((i for i, m in enumerate(prompt) if m.get("role") == "assistant"), default=-1)
                 arrived = prompt[last + 1:]  # what came back since the previous reply: tool results, messages to the agent
                 if self.steps:
@@ -137,7 +134,9 @@ class Rollout:
             running = self.steps[started[-1]]
             if running["t"] + (running["dur"] or 0) + 2 < r["at"] and started[-1] + 1 < len(self.steps):
                 started.append(started[-1] + 1)  # that command had already returned: the next step is the one that sees the answer
-            before = [i for i in submits if self.steps[i]["t"] <= r["at"] + 5 and i not in used]
+            # rounds and commands both come in order of time: a command before the one the previous round used is not
+            # this round's (it was refused, for example during a cooldown)
+            before = [i for i in submits if self.steps[i]["t"] <= r["at"] + 5 and i > max(used, default=-1)]
             if before:
                 used.add(before[-1])
                 pairs.append((before[-1], max(before[-1], started[-1]), r, None))

@@ -1,4 +1,6 @@
 # 实验组：标到的步算 loss。
-arm: labelled            # labelled 标到的步 / random_matched 每条 rollout 随机抽同样多 / all 全部
-patterns: []             # 只用其中几个 pattern 时写名字，如 [C1, D3]；空 = 全部
-seed: 0                  # random_matched 的抽样种子
+arm: labelled                # labelled 标到的步 / random_matched 每条 rollout 随机抽同样多 / all 全部
+patterns: []                 # 只用其中几个 pattern 时写名字，如 [C1, D3]；空 = 全部
+seed: 0                      # random_matched 的抽样种子
+require_reasoning: true      # 回复里没有思考文字的步不选
+max_tokens: 196608           # 超过这个长度的步不选（要和训练 recipe 的 max_input_tokens 一致；需要 --tokens）

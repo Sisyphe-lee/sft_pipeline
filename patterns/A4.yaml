@@ -1,13 +1,16 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: A4
 title: One change per submission
 places:
 - submit
 questions:
-- id: changed_and_meant_to_compare
+- id: scoring_change
   expect: true
-  text: the submission differs from the last judged version and the agent will read the score to learn whether the change helped. False for the first submission, for unchanged files, and for a submission made to learn a fact about the judge.
+  text: since the last judged version the agent changed something in the solution that can change the score. False when only documentation, comments, notes or logs changed, when nothing changed, and when the files were put back to an earlier judged version.
+- id: reads_to_compare
+  expect: true
+  text: the submission is made to learn from the score whether this change helped. False for the first submission and for a submission made to learn a fact about the judge.
 - id: one_idea_or_each_measured
   expect: true
   text: everything changed since the last judged version implements one idea, or every change was measured on its own beforehand.

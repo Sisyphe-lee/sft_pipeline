@@ -7,6 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 REPO = Path(__file__).parents[1]
 
 
@@ -35,8 +36,8 @@ class Model(BaseHTTPRequestHandler):
             Model.asked.append(name)
             answer = {"answers": {}, "steps": {}}
             if name == "C1":
-                answer = {"answers": {"as_expected": False, "message_gives_cause": False, "ran_a_check": True, "check_can_answer": True,
-                                      "changed_before_check": False, "stated_finding": True},
+                answer = {"answers": {"against_expectation": True, "message_gives_cause": False, "ran_a_check": True, "check_can_answer": True,
+                                      "changed_before_check": False, "finding_from_check": True, "next_follows": True},
                           "steps": {"result_step": 2, "check_step": 3, "finding_step": 4}}
         else:  # a reading: report one unexpected result at step 2
             answer = {"phases": [], "directions": [], "moments": [{"type": "unexpected", "step": 2, "steps": [2, 4], "what": "worse"}]}
@@ -71,7 +72,9 @@ def test_annotate_then_select(tmp_path):
     labels = [json.loads(line) for line in (tmp_path / "data/labels.jsonl").read_text().splitlines()]
     assert [(x["pattern"], x["steps"]) for x in labels] == [("C1", [3, 4])]
     row = json.loads((tmp_path / "data/rows/run1-toy.jsonl").read_text().splitlines()[2])
-    assert row["metadata"]["turn"] == 3 and row["completion"]["reasoning_content"] == "think 2"
+    assert row["metadata"]["turn"] == 3 and row["completion"][0]["reasoning_content"] == "think 2"
+    assert row["images"] == [] and row["metadata"]["holds"] == ["reasoning", "text", "call"]
+    assert row["completion"][0]["tool_calls"][0]["function"]["arguments"] == {"cmd": "run 2"}  # an object, as chat templates need
     assert [m.get("reasoning_content") for m in row["prompt"] if m["role"] == "assistant"] == ["think 0", "think 1"]  # put back from earlier replies
     # a second run asks nothing
     asked = len(Model.asked)
@@ -89,4 +92,28 @@ def test_annotate_then_select(tmp_path):
     subprocess.run([sys.executable, str(REPO / "data_pipeline/select_rows.py"), "--policy", str(REPO / "configs/data_policies/control_random.yaml"),
                     "--rows", str(tmp_path / "data/rows"), "--labels", str(tmp_path / "data/labels.jsonl"), "--exclude", str(fixes), "--output", str(control)], check=True)
     assert len(json.loads(control.read_text())["train"]) == 1  # one labelled step is left after the correction, so one random row
+    # measured lengths: a row the trainer cannot use and a row over the limit are not selected, and the control draws from the rest
+    tokens = tmp_path / "data/tokens"
+    tokens.mkdir()
+    (tokens / "run1-toy.jsonl").write_text("".join(json.dumps(dict(turn=n, tokens=300000 if n == 4 else 100, prompt_tokens=90, ok=n != 2,
+                                                                   problem=None if n != 2 else "template: x")) + "\n" for n in range(1, 6)))
+    for policy, turns in (("pattern_all", [3]), ("all_turns", [1, 3, 5])):
+        out = tmp_path / f"{policy}-measured.json"
+        subprocess.run([sys.executable, str(REPO / "data_pipeline/select_rows.py"), "--policy", str(REPO / f"configs/data_policies/{policy}.yaml"),
+                        "--rows", str(tmp_path / "data/rows"), "--labels", str(tmp_path / "data/labels.jsonl"), "--tokens", str(tokens), "--output", str(out)], check=True)
+        manifest = json.loads(out.read_text())
+        assert [r["source_line"] for r in manifest["train"]] == turns and manifest["train"][0]["estimated_tokens"] == 100
+    assert manifest["selection"]["unusable"] == {"trainer cannot use it: template: x": 1, "longer than max_tokens": 1}
     server.shutdown()
+
+
+def test_messages_for_the_student():
+    import export_capture
+    messages, changes = export_capture.for_student([
+        {"role": "system", "content": "a"}, {"role": "system", "content": "b"}, {"role": "user", "content": [{"type": "text", "text": "see"}, {"type": "image_url", "image_url": {}}]},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "function": {"name": "f", "arguments": "{\"x\": 1}"}}, {"id": "2", "function": {"name": "f", "arguments": "{broken"}}]},
+        {"role": "system", "content": "late"}])
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"] and messages[0]["content"] == "a\n\nb"
+    assert messages[1]["content"] == "see\n[image]"
+    assert [c["function"]["arguments"] for c in messages[2]["tool_calls"]] == [{"x": 1}, {"_unparsed": "{broken"}]
+    assert changes == {"system_merged": 1, "images": 1, "unparsed_calls": 1, "system_later": 1}

@@ -49,7 +49,7 @@ def main() -> int:
     from PIL import Image
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-    from physical_agent.artifact_refs import resolve_artifact_ref
+    from training.artifact_refs import resolve_artifact_ref
     from transformers import AutoProcessor, AutoModelForImageTextToText
     import transformers
     print("transformers", transformers.__version__, flush=True)

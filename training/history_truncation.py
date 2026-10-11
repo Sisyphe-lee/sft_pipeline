@@ -10,7 +10,7 @@ from datetime import timedelta
 from PIL import Image
 import torch.distributed as dist
 
-from physical_agent.artifact_refs import resolve_artifact_ref
+from training.artifact_refs import resolve_artifact_ref
 
 
 def add_length_arguments(parser):

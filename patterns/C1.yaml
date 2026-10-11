@@ -1,39 +1,43 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: C1
 title: Check the reason of an unexpected result before changing anything
 places:
 - unexpected
 - result
 questions:
-- id: as_expected
-  expect: false
-  text: the result is what the agent expected, or one more step of a trend it has already seen, or the success of what it just tried.
+- id: against_expectation
+  expect: true
+  text: before the result the agent had changed something or said what it expected, and the result goes against that. False for one more step of a trend it has already seen, for the success of what it just tried, for the first measurement of a starting state, and for an error while setting up the environment.
 - id: message_gives_cause
   expect: false
   text: the output itself says what is wrong (an error message, a refusal that names its reason), so nothing is left to find out.
 - id: ran_a_check
   expect: true
-  text: after the result the agent ran a command whose purpose was to find the reason. Reading the same output again, or reasoning, is not a check.
+  text: after the result the agent ran a command whose purpose was to find the reason. Reasoning, reading again output it has already seen, listing earlier scores or submissions, and repeating the same measurement are not checks.
 - id: check_can_answer
   expect: true
   text: 'the check''s output bears on the reason: it could have confirmed or ruled out a cause.'
 - id: changed_before_check
   expect: false
   text: it changed the solution or submitted again before the check.
-- id: stated_finding
+- id: finding_from_check
   expect: true
-  text: it says what the check showed, and its next step follows from that.
+  text: the cause it states is what the check's output shows, not what it believed before the check.
+- id: next_follows
+  expect: true
+  text: its next change or decision is the one that finding calls for. False when it sets the finding aside and tries something else.
 steps:
 - id: result_step
   then: <
 - id: check_step
   run: true
+  within: 3
   then: <=
 - id: finding_step
 span:
   from: check_step
   to: finding_step
-  max: 8
+  max: 4
 notes:
 - 'Also `"source"`: `"judge"` when the unexpected result is a judge answer, `"local"` otherwise.'

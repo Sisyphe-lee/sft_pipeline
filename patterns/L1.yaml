@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: L1
 title: A local number before submitting
 places:
@@ -7,7 +7,7 @@ places:
 questions:
 - id: meant_to_score
   expect: true
-  text: the submission is meant to score. False for a first look at the judge and for a submission made to learn something.
+  text: the submission is meant to score. False for a first look at the judge, for a submission made to learn something, and while the solution is still the files as given.
 - id: measured_this_version
   expect: true
   text: a local run printed a score-like number for exactly the version that is submitted.
@@ -16,7 +16,7 @@ questions:
   text: a file of the solution changed between that run and the submit command.
 - id: number_says_submit
   expect: true
-  text: the number is at least as good as the best so far, or the agent gives it as the reason to submit.
+  text: the number is at least as good as the best version's, and the agent gives it as the reason to submit. False when another number from the same run is clearly worse than the best version's.
 steps:
 - id: measure_step
   run: true

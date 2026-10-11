@@ -7,12 +7,15 @@ CAPTURE_DIR holds `resp_<id>/{request,upstream-request,upstream-response}.json.g
 `scripts/kimi_responses_bridge.py --capture-dir`. Exchanges are grouped by the capture id the harness sent
 (`sforge.run.<task>.<run id>`) and ordered by time. A row is
 
-    {"prompt": [chat messages the model saw], "completion": {the assistant message it returned}, "tools": [...],
-     "metadata": {"task": {"id": ...}, "trajectory_id": ..., "turn": 1.., "time": epoch seconds, ...}}
+    {"prompt": [chat messages the model saw], "completion": [the assistant message it returned], "tools": [...],
+     "images": [], "metadata": {"task": {"id": ...}, "trajectory_id": ..., "turn": 1.., "time": epoch seconds, ...}}
 
-Every reply is kept, whatever the run's outcome; choosing rows is the job of the selection step. Earlier turns in
-`prompt` get their reasoning text back from the replies captured before (captures made before the bridge kept
-reasoning in the history lack it). Standard library only.
+which is what the trainer reads (training/vlm_collator.py). Every reply is kept, whatever the run's outcome; choosing
+rows is the job of the selection step. Earlier turns in `prompt` get their reasoning text back from the replies
+captured before (captures made before the bridge kept reasoning in the history lack it).
+
+The messages are stored the way the student's chat template accepts them, see `for_student`: the same must be done
+to the requests the student receives when it runs under the scaffold. Standard library only.
 """
 import argparse
 import gzip
@@ -34,6 +37,54 @@ def turn_key(message):
         content = message.get("content")
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def call_arguments(text):
+    """Tool call arguments as an object: chat templates render them key by key. Text that is no JSON object is kept whole."""
+    if isinstance(text, dict):
+        return text
+    try:
+        value = json.loads(text) if text else {}
+    except ValueError:
+        return {"_unparsed": text}
+    return value if isinstance(value, dict) else {"_unparsed": text}
+
+
+def for_student(messages):
+    """(messages, changes) as a chat template with one system block accepts them.
+
+    Codex sends its instructions and a permissions note as two system messages: the leading system messages become
+    one, a later one becomes a user message. Tool call arguments become objects. Images become a text mark: the rows
+    are text only."""
+    out, changes, head = [], {}, True
+    for message in messages:
+        message = dict(message)
+        if isinstance(message.get("content"), list):
+            parts = []
+            for part in message["content"]:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(part.get("text") or "")
+                else:
+                    parts.append("[image]")
+                    changes["images"] = changes.get("images", 0) + 1
+            message["content"] = "\n".join(parts)
+        if message.get("role") == "system":
+            if head and out:
+                out[0]["content"] = f"{out[0]['content']}\n\n{message.get('content') or ''}"
+                changes["system_merged"] = changes.get("system_merged", 0) + 1
+                continue
+            if not head:
+                message["role"] = "user"
+                changes["system_later"] = changes.get("system_later", 0) + 1
+        else:
+            head = False
+        if message.get("tool_calls"):
+            message["tool_calls"] = [dict(call, function=dict(call.get("function") or {}, arguments=call_arguments((call.get("function") or {}).get("arguments"))))
+                                     for call in message["tool_calls"]]
+            if any("_unparsed" in call["function"]["arguments"] for call in message["tool_calls"]):
+                changes["unparsed_calls"] = changes.get("unparsed_calls", 0) + 1
+        out.append(message)
+    return out, changes
 
 
 def load(path):
@@ -95,13 +146,19 @@ def export(ident, exchanges, out):
                 completion["tool_calls"] = message["tool_calls"]
             rows += 1
             usage = body.get("usage") or {}
+            prompt, changes = for_student(prompt)
+            completion = for_student([completion])[0][0]
+            holds = [name for name, has in (("reasoning", completion.get("reasoning_content")), ("text", completion["content"].strip()),
+                                             ("call", completion.get("tool_calls"))) if has]
+            if any("_unparsed" in call["function"]["arguments"] for call in completion.get("tool_calls") or []):
+                holds.append("unparsed_call")
             # the history normally grows by this turn and its tool results; a shorter one means the scaffold rewrote it (compaction)
             context = "start" if before is None else ("rewritten" if len(prompt) < before else "continued")
             before = len(prompt)
-            row = dict(prompt=prompt, completion=completion, tools=sent.get("tools") or [], metadata=dict(
+            row = dict(prompt=prompt, completion=[completion], tools=sent.get("tools") or [], images=[], metadata=dict(
                 task=dict(id=task, seed=0), trajectory_id=run, turn=rows, time=began, seconds=round((answer.get("timestamp") or began) - began, 2),
                 exchange=os.path.basename(path), finish=choice.get("finish_reason"), context=context,
-                kind="turn" if sent.get("tools") else "no_tools", reasoning_effort=sent.get("reasoning_effort"),
+                kind="turn" if sent.get("tools") else "no_tools", holds=holds, changes=changes, reasoning_effort=sent.get("reasoning_effort"),
                 usage={k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")}))
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
     os.replace(target.with_suffix(".tmp"), target)

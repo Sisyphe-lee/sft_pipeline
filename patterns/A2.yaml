@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: A2
 title: Use the parts of the judge's answer
 places:
@@ -7,17 +7,21 @@ places:
 questions:
 - id: saw_parts
   expect: true
-  text: 'the command printed more than a total: results per test or dataset, sub-scores, named failures.'
+  text: the command printed separate results for two or more parts (tests, datasets, sub-scores). False when there is one test or only a total, also when the failing test is named.
 - id: planned_before_result
   expect: false
-  text: the work that follows was already planned or begun before this result.
+  text: before this result the agent was already working on this part, or had announced this work.
 - id: part_names_target
   expect: true
-  text: the agent names one part of the answer, and its next piece of work is on exactly that part.
+  text: the agent names one part of the answer, and its next piece of work is on exactly that part. False when the change applies to all parts alike.
+- id: only_undoes
+  expect: false
+  text: the work that follows only takes back the change that was just judged.
 steps:
 - id: result_step
   then: <
 - id: work_step
+  within: 2
   text: the first step of that work
 span:
   from: work_step

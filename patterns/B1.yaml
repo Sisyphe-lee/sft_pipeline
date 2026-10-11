@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: B1
 title: Back to the best version
 places:
@@ -14,10 +14,17 @@ questions:
   text: it made further changes on top of the worse version before going back.
 - id: best_back
   expect: true
-  text: it puts the best version back.
+  text: after the command, the files a submission would take are the best judged version, with every change made since that version undone. Judge by what the command does, not by what the agent says. False when only the last change is undone and earlier ones stay.
+- id: restore_only
+  expect: true
+  text: the restoring command makes no other change to the solution. Submitting the restored version again is allowed.
 steps:
+- id: worse_step
+  then: <=
+  text: where the agent reads the result that is below the best
 - id: restore_step
   run: true
+  within: 6
   text: the command that puts it back
 span:
   from: restore_step

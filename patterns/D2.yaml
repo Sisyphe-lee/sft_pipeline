@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: D2
 title: Reopen an idea that was set aside
 places:
@@ -11,27 +11,28 @@ questions:
   text: the agent named something it could do and did not do it.
 - id: tested_soon_after
   expect: false
-  text: it tested the thing soon after, before any stall.
+  text: it took the idea up within about ten steps, or before two other attempts had finished.
 - id: stalled_after
   expect: true
-  text: afterwards several attempts brought no new best, or it said nothing was left to try.
+  text: between the named step and the reopening at least two finished attempts at other things (judged rounds, or complete local evaluations where there is no judge) brought no new best, or the agent said nothing was left to try. A bug, a crash, a hung run or a single worse result is not a stall.
 - id: reopened_same_idea
   expect: true
   text: it went back to that same idea, not to a new one.
 - id: test_reached_idea
   expect: true
-  text: the test it ran tried the idea itself and gave an answer about it. A test that failed for another reason first does not count.
+  text: the idea itself was built and run, and its result is in the log. Looking up how to do it, probing an interface, and a test that failed for another reason first are not tests of the idea.
 steps:
 - id: named_step
   then: <
-- id: stall_step
-  then: <=
 - id: reopen_step
-  text: where it takes the idea up again
+  apart: 10
+  text: the first step where it starts on the idea again
   then: <=
 - id: test_step
   run: true
+  within: 6
+  text: the command that runs the test, not a step that only waits for it
 span:
-  from: reopen_step
-  to: test_step
-  max: 6
+  steps:
+  - reopen_step
+  - test_step

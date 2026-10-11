@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from physical_agent.artifact_refs import resolve_artifact_ref
+from training.artifact_refs import resolve_artifact_ref
 from training.history_truncation import crop_history, validate_completion
 
 
