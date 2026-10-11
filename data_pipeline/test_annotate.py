@@ -100,7 +100,7 @@ def test_annotate_then_select(tmp_path):
     for policy, turns in (("pattern_all", [3]), ("all_turns", [1, 3, 5])):
         out = tmp_path / f"{policy}-measured.json"
         subprocess.run([sys.executable, str(REPO / "data_pipeline/select_rows.py"), "--policy", str(REPO / f"configs/data_policies/{policy}.yaml"),
-                        "--rows", str(tmp_path / "data/rows"), "--labels", str(tmp_path / "data/labels.jsonl"), "--tokens", str(tokens), "--output", str(out)], check=True)
+                        "--rows", str(tmp_path / "data/rows"), "--labels", str(tmp_path / "data/labels.jsonl"), "--output", str(out)], check=True)  # tokens/ is found beside rows/
         manifest = json.loads(out.read_text())
         assert [r["source_line"] for r in manifest["train"]] == turns and manifest["train"][0]["estimated_tokens"] == 100
     assert manifest["selection"]["unusable"] == {"trainer cannot use it: template: x": 1, "longer than max_tokens": 1}

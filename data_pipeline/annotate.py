@@ -2,10 +2,11 @@
 """标注：抓包 -> 训练行 -> Kimi 标注 -> 标签文件。离线做一次，之后选数据时反复使用。
 
     python3 data_pipeline/annotate.py --config configs/labelling/kimi_v1.yaml \\
-        --capture CAPTURE_DIR [CAPTURE_DIR ...] --runs RUNS_DIR --tasks TASKS_DIR --data DATA_DIR
+        --capture CAPTURE_DIR [CAPTURE_DIR ...] --runs RUNS_DIR --tasks TASKS_DIR --student MODEL_DIR --data DATA_DIR
 
-写出 DATA_DIR/rows/（训练行）和 DATA_DIR/labels.jsonl（标签）。只问还没问过的：中断后重跑即可，
-新增 rollout 只标新增的，改了某个 patterns/<名字>.yaml 只重标这一个 pattern。选数据见 select_rows.py。
+写出 DATA_DIR/rows/（训练行）、DATA_DIR/tokens/（每行在学生模型下的长度，给了 --student 才有）和
+DATA_DIR/labels.jsonl（标签）。只问还没问过的：中断后重跑即可，新增 rollout 只标新增的，
+改了某个 patterns/<名字>.yaml 只重标这一个 pattern。选数据见 select_rows.py。
 """
 import argparse
 import json
@@ -21,6 +22,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import export_capture  # noqa: E402
 import label  # noqa: E402
+import measure_rows  # noqa: E402
 import rollout  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
@@ -51,7 +53,9 @@ def main():
     parser.add_argument("--capture", nargs="+", required=True, help="bridge capture directories (resp_<id>/...)")
     parser.add_argument("--runs", required=True, type=Path, help="harness run directories: RUNS/<trajectory id>/<task>/")
     parser.add_argument("--tasks", type=Path, help="EdgeBench task specifications (<task>.json), for the score direction")
-    parser.add_argument("--data", required=True, type=Path, help="data directory: rows/, work/ and labels-*.jsonl are written here")
+    parser.add_argument("--student", type=Path, help="the student model's directory (tokenizer and chat template): measure every row's "
+                        "length as the trainer will see it, so that selection can leave out rows it cannot use")
+    parser.add_argument("--data", required=True, type=Path, help="data directory: rows/, tokens/, work/ and labels.jsonl are written here")
     parser.add_argument("--only", help="use only rollouts whose capture id contains this text")
     args = parser.parse_args()
     lab = load_config(args.config)
@@ -73,6 +77,8 @@ def main():
             r.render(work / run, lab["render_cap"])
             print(f"render {run}: {len(r.steps)} steps, {len(r.subs)} judged rounds" + ("" if run_dir.is_dir() else " (no run directory found)"), flush=True)
     dirs = [work / run for _, run in names]
+    if args.student:  # lengths under the student's tokenizer; needs no labelling model, so it comes before the slow part
+        measure_rows.run(args.student, rows_dir)
     # 3. readings and 4. places: the labelling model reports where to look
     urls = kimi_urls()
     todo, lock = list(dirs), threading.Lock()

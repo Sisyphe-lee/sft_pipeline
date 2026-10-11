@@ -3,6 +3,8 @@
 
     python3 data_pipeline/measure_rows.py --model MODEL_DIR --rows DATA_DIR/rows [--out DATA_DIR/tokens] [--workers 32]
 
+annotate.py --student MODEL_DIR 会在导出后自动做这一步；这个脚本用来单独补量。
+
 写出 DATA_DIR/tokens/<rollout>.jsonl，和训练行一一对应，每行：
 
     {"turn": N, "tokens": 整行 token 数, "prompt_tokens": 输入部分, "ok": true|false, "problem": null 或原因}
@@ -60,19 +62,12 @@ def offsets(path):
     return jobs
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", required=True, help="学生模型目录（要有 tokenizer 和 chat_template.jinja）")
-    parser.add_argument("--rows", required=True, type=Path, help="annotate.py 写出的训练行目录")
-    parser.add_argument("--out", type=Path, help="默认是 rows 旁边的 tokens/")
-    parser.add_argument("--workers", type=int, default=min(32, os.cpu_count() or 1))
-    parser.add_argument("--only", help="只量文件名里含这段文字的 rollout")
-    args = parser.parse_args()
-    out = args.out or args.rows.parent / "tokens"
+def run(model, rows, out=None, workers=None, only=None):
+    out = Path(out or Path(rows).parent / "tokens")
     out.mkdir(parents=True, exist_ok=True)
-    with Pool(args.workers, initializer=start, initargs=(args.model,)) as pool:
-        for path in sorted(args.rows.glob("*.jsonl")):
-            if args.only and args.only not in path.name:
+    with Pool(workers or min(32, os.cpu_count() or 1), initializer=start, initargs=(str(model),)) as pool:
+        for path in sorted(Path(rows).glob("*.jsonl")):
+            if only and only not in path.name:
                 continue
             jobs, target = offsets(path), out / path.name
             if target.exists() and sum(1 for _ in open(target)) == len(jobs) and target.stat().st_mtime >= path.stat().st_mtime:
@@ -86,9 +81,20 @@ def main():
             for r in results:
                 if not r["ok"]:
                     problems[r["problem"][:60]] = problems.get(r["problem"][:60], 0) + 1
-            print(json.dumps(dict(rollout=path.stem, rows=len(results), ok=sum(r["ok"] for r in results), problems=problems,
-                                  tokens=dict(p50=sizes[len(sizes) // 2], p90=sizes[int(0.9 * (len(sizes) - 1))], max=sizes[-1]) if sizes else {}),
-                             ensure_ascii=False), flush=True)
+            print("measure " + json.dumps(dict(rollout=path.stem, rows=len(results), ok=sum(r["ok"] for r in results), problems=problems,
+                                               tokens=dict(p50=sizes[len(sizes) // 2], p90=sizes[int(0.9 * (len(sizes) - 1))], max=sizes[-1]) if sizes else {}),
+                                          ensure_ascii=False), flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--model", required=True, help="学生模型目录（要有 tokenizer 和 chat_template.jinja）")
+    parser.add_argument("--rows", required=True, type=Path, help="annotate.py 写出的训练行目录")
+    parser.add_argument("--out", type=Path, help="默认是 rows 旁边的 tokens/")
+    parser.add_argument("--workers", type=int, default=min(32, os.cpu_count() or 1))
+    parser.add_argument("--only", help="只量文件名里含这段文字的 rollout")
+    args = parser.parse_args()
+    run(args.model, args.rows, args.out, args.workers, args.only)
 
 
 if __name__ == "__main__":

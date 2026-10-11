@@ -2,7 +2,7 @@
 """选数据：标签 + 策略 -> 训练清单。不调用模型，几秒完成，可以反复换策略。
 
     python3 data_pipeline/select_rows.py --policy configs/data_policies/pattern_all.yaml \\
-        --rows DATA_DIR/rows --labels DATA_DIR/labels.jsonl [more.jsonl ...] [--tokens DATA_DIR/tokens] [--exclude fixes.jsonl] --output MANIFEST.json
+        --rows DATA_DIR/rows --labels DATA_DIR/labels.jsonl [more.jsonl ...] [--exclude fixes.jsonl] --output MANIFEST.json
 
 清单是训练器读取的格式（data_pipeline/manifest.py）：按文件和字节位置指向训练行，不复制数据。
 没选中的步不算 loss，但仍在后面步的历史里。
@@ -111,7 +111,8 @@ def main():
     parser.add_argument("--policy", required=True, type=Path, help="configs/data_policies/*.yaml")
     parser.add_argument("--rows", required=True, type=Path, help="directory of training rows written by annotate.py")
     parser.add_argument("--labels", nargs="*", default=[], type=Path, help="label files written by annotate.py")
-    parser.add_argument("--tokens", type=Path, help="directory written by measure_rows.py; without it lengths are not checked")
+    parser.add_argument("--tokens", type=Path, help="measured lengths (annotate.py --student, or measure_rows.py); default: tokens/ beside "
+                        "the rows when it exists. Without them lengths are not checked")
     parser.add_argument("--exclude", nargs="*", default=[], type=Path,
                         help="correction files: lines {\"trajectory_id\": ..., \"steps\": [...]} whose steps are not selected")
     parser.add_argument("--output", required=True, type=Path, help="the training manifest to write (.json)")
@@ -119,7 +120,8 @@ def main():
     policy = dict(POLICY, **(yaml.safe_load(args.policy.read_text()) or {}))
     if policy.keys() - POLICY.keys():
         parser.error(f"unknown policy keys: {sorted(policy.keys() - POLICY.keys())}")
-    summary = select(args.rows, args.labels, args.output, policy["arm"], policy["patterns"], policy["seed"], args.exclude, args.tokens,
+    tokens = args.tokens or (args.rows.parent / "tokens" if (args.rows.parent / "tokens").is_dir() else None)
+    summary = select(args.rows, args.labels, args.output, policy["arm"], policy["patterns"], policy["seed"], args.exclude, tokens,
                      policy["require_reasoning"], policy["max_tokens"])
     print(f"manifest {args.output}: arm {summary['arm']}, {summary['rows']} rows from {len(summary['rollouts'])} rollouts; "
           f"labels cover {summary['labelled_steps']} steps, {summary['labelled_usable']} usable; unusable rows {summary['unusable'] or 'none'}; "

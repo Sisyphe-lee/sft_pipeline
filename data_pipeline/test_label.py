@@ -56,6 +56,6 @@ def test_a_probe_must_be_a_submit_command():
     a3 = label.load_patterns()[1]["A3"]
     kinds = {n: "RUN" for n in range(1, 50)}
     row = dict(steps=dict(question_step=10, submit_step=11, answer_step=12),
-               answers=dict(fact_about_judge=True, candidate=False, question_before=True, answer_used=True, left_on_probe=False))
+               answers=dict(fact_about_judge=True, candidate=False, built_to_answer=True, question_before=True, answer_used=True, left_on_probe=False))
     assert label.decide(a3, row, kinds, [11]) == ([10, 11, 12], [])
     assert label.decide(a3, row, kinds, [30])[1] == ["submit_step is not a submit command"]
