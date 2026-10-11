@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+@HEADLINE@
+#
+# 本文件由 jobs/tools/make_train_job.sh 套 jobs/templates/train_sft_s3.sh.tmpl 生成,不要手改 ——
+# 要改改模板。它和同名的 *_robbys7.yml 是同一份配方,区别只有:代码用 $P/repo_sft 而不是平台 clone、
+# 单机 torchrun --standalone 不做 rendezvous、要自己补上镜像 ENV 里那几行补丁(见第 2 段)、
+# OSS 的 config 从 CPFS 的 $P/secrets/ossutilconfig 装到 /root(pod 里是 launcher 写的)。
+#
+# 起法(在 s3 上,放进 tmux 免得 rca 一断就没了):
+#   tmux new-session -d -s @RUN@ "bash <本脚本>"
+#   tail -f $P/logs/train_@RUN_SHORT@/master.log
+set -u
+
+# ---------- 1. 路径与数据身份 ----------
+# P 可用环境变量覆盖:在另一块 CPFS 上照 $P 的布局摆一份(repo_sft、基座、qwendeps、data/manifests、
+# secrets、../lcy_data),`P=<那里> bash <本脚本>` 就能在挂了那块盘的任何容器上跑,产物也落在那里。
+export P=${P:-/personal/ppc_overfit_20260810}
+export REPO=${REPO:-$P/repo_sft}
+export RUN=@RUN@
+export OUT=@OUT_ROOT_S3@/$RUN
+export L=@LOG_ROOT_S3@/train_@RUN_SHORT@ ; mkdir -p $L
+export BASE=$P/@BASE@
+# DS / DS_SHA:单一 source 的老数据集才给;多 source 数据直接按 manifest 读取(见 preflight)
+export DS=@DS_S3@
+export DS_SHA=@DS_SHA@
+export DM=@DM_PATH_S3@
+export DM_SHA=@DM_SHA@
+export DATA_ROOT=@DATA_ROOT_S3@
+export RECIPE=$REPO/configs/recipes/@RECIPE_FILE@
+export OSSB=antsys-robbys3-prod
+export OSSROOT=lingcong/output/harness/$RUN
+# 续训:make_train_job.sh --resume 填这里(空 = 从头训)。preflight 用它放行已存在的 $OUT,
+# train_sft 用它恢复 optimizer / scheduler / rng,resolved_config.json 会逐字段核对配置没变。
+export RESUME_FROM=@RESUME_FROM@
+ls $REPO/training/train_sft.py $REPO/jobs/tools/preflight_train.sh >/dev/null \
+  || { echo "$REPO 不是本 repo 的 checkout" ; exit 2 ; }
+echo "CODE_COMMIT=$(git -C $REPO rev-parse HEAD 2>/dev/null || echo no-git) REPO=$REPO" | tee -a $L/job.log
+
+# ---------- 2. 运行环境(和 pod 一样走 CPFS 的 qwendeps)----------
+unset PYTHONPATH CUDA_HOME CUDA_PATH CUDA_BIN_PATH CUDACXX
+export PYTHONPATH=$P/qwendeps/qwen35-fla:$P/qwendeps/qwen35-train:$REPO
+export TRITON_LIBCUDA_PATH=/usr/lib/x86_64-linux-gnu
+# 这张卡(名字叫 L20D,其实 torch 报 cc (10, 3)、148 个 SM、268 GiB,就是 B300)要 nvrtc 12.9 和
+# ptxas 12.9 才认 sm_103,镜像自带的 12.8 都不认。镜像把老 job 那套补丁整个做进了 ENV
+# (/proc/1/environ):LD_LIBRARY_PATH / LD_PRELOAD 指 /opt/qwendeps 的 nvrtc 12.9,
+# TRITON_PTXAS_PATH 指 /opt/qwendeps 的 ptxas 12.9,再加 TORCH_CUDA_ARCH_LIST=10.0+PTX。pod 里
+# launcher 起 command 时继承这份 ENV,所以 pod 模板不写;rca / tmux 起的 shell 不继承,这里逐行
+# 照抄。2026-09-17 在 s3 上少一行就炸一关:没 LD_PRELOAD 是 "nvrtc: invalid value for
+# --gpu-architecture",有了它没 TRITON_PTXAS_PATH 是 triton 自带 ptxas 对 sm_103a 退 255。
+# 镜像里没有 /opt/qwendeps(别的镜像起的容器)就用站点里拷的那份 $P/nvidia(cuda_nvrtc + cuda_nvcc,
+# 从 s3 的 /opt/qwendeps/fla/nvidia 拷的,312 M);两处都没有就打一行,训练大概率在第一次编译 kernel 时炸。
+NV=/opt/qwendeps/fla/nvidia ; [ -f $NV/cuda_nvrtc/lib/libnvrtc.so.12 ] || NV=$P/nvidia
+[ -f $NV/cuda_nvrtc/lib/libnvrtc.so.12 ] || echo "没有 nvrtc 12.9(/opt/qwendeps 与 $P/nvidia 都没有),B300 上 triton / nvrtc 会炸" | tee -a $L/job.log
+export LD_LIBRARY_PATH=$NV/cuda_nvrtc/lib
+export LD_PRELOAD=$NV/cuda_nvrtc/lib/libnvrtc.so.12
+export TRITON_PTXAS_PATH=$NV/cuda_nvcc/bin/ptxas
+export TORCH_CUDA_ARCH_LIST="10.0+PTX"
+export ENABLE_MY_GLOBAL_HOOK=0 ENABLE_MY_FLASH_ATTN_HOOK=0 USE_TF=0
+export HF_HOME=/root/hf TORCH_EXTENSIONS_DIR=/root/te TORCHINDUCTOR_CACHE_DIR=/root/ti TRITON_CACHE_DIR=/root/tc
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export FLASH_ATTENTION_DETERMINISTIC=1
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+/usr/bin/python3 -c "import oss2, wandb" 2>/dev/null || pip install -q oss2 wandb
+# W&B:照 hjy 的六行,key 明文(用户拍板)。
+unset WANDB_DISABLED WANDB_SILENT
+export WANDB_API_KEY=local-aa75c945a903cde880b6623cd9cef7fa2191839a
+export WANDB_BASE_URL=http://33.180.4.104
+export WANDB_ENTITY=@WANDB_ENTITY@
+export WANDB_PROJECT=@WANDB_PROJECT@
+export WANDB_MODE=online
+export WANDB_DIR=$OUT
+if [ -n "$RESUME_FROM" ] ; then
+  # 续训接着原来那个 W&B run 画,不另开:run id 就在 $OUT/wandb/run-<时间>-<id>/ 的目录名里
+  WID=$(ls -d $OUT/wandb/run-*-* 2>/dev/null | tail -1 | sed -E 's/.*-([a-z0-9]+)$/\1/')
+  [ -n "$WID" ] && export WANDB_RUN_ID=$WID WANDB_RESUME=allow
+  echo "续训:W&B run id ${WID:-没找到,会另开一个}" | tee -a $L/job.log
+fi
+wandb login --host="$WANDB_BASE_URL" 2>&1 | tee -a $L/job.log
+# OSS:s3 上没有 launcher 帮你写 config。用户拍板把内网那份放在 CPFS 的 $P/secrets/ossutilconfig
+# (600),容器 recycle 之后 /root 那份没了就从它装回来。两处都没有就只打一行,训练照跑,
+# checkpoint 与日志留在 CPFS。
+export OSS_ENDPOINT=oss-cn-shanghai-internal.aliyuncs.com
+if [ ! -f ~/.ossutilconfig ] && [ -f $P/secrets/ossutilconfig ] ; then
+  cp $P/secrets/ossutilconfig ~/.ossutilconfig && chmod 600 ~/.ossutilconfig
+  echo "OSS config 从 $P/secrets 装到 /root/.ossutilconfig" | tee -a $L/job.log
+fi
+if [ -f ~/.ossutilconfig ] ; then
+  sed -i -E "s#^endpoint=.*#endpoint=$OSS_ENDPOINT#" ~/.ossutilconfig
+  grep -aE "^endpoint=" ~/.ossutilconfig | tee -a $L/job.log
+else
+  echo "没有 /root/.ossutilconfig:这次不传 OSS,产物留在 $OUT 与 $L" | tee -a $L/job.log
+fi
+/usr/bin/python3 -c "import sys,torch,transformers,flash_attn,triton,oss2,wandb;print('STACK python',sys.version.split()[0],'torch',torch.__version__,'cuda',torch.version.cuda,'transformers',transformers.__version__,'flash_attn',flash_attn.__version__,'triton',triton.__version__,'oss2',oss2.__version__,'wandb',wandb.__version__)" 2>&1 | tee -a $L/job.log
+
+# ---------- 3. 发射前校验门(和 pod 同一份脚本)----------
+echo "===TRAIN-START=== $(date '+%F %T')" | tee -a $L/job.log
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | head -1 | tee -a $L/job.log
+bash $REPO/jobs/tools/preflight_train.sh > $L/preflight_$(hostname).log 2>&1 ; prc=$?
+cat $L/preflight_$(hostname).log ; cat $L/preflight_$(hostname).log >> $L/job.log
+[ $prc -eq 0 ] || exit $prc
+
+# ---------- 4. 发射:单机 8 卡 ----------
+# master.log 用追加:续训时前面那段(含被 kill 前的 loss)要留着,上一段和这一段之间打一条分界。
+[ -n "$RESUME_FROM" ] && echo "===== RESUME $(date '+%F %T') from $RESUME_FROM =====" >> $L/master.log
+cd $REPO
+/usr/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=@GPUS@ training/train_sft.py --recipe $RECIPE --model $BASE --data-manifest $DM --data-root $DATA_ROOT --output $OUT --run-name $RUN --oss-root $OSSROOT ${RESUME_FROM:+--resume-from-checkpoint $RESUME_FROM} >> $L/master.log 2>&1
+rc=$?
+
+# ---------- 5. 收尾 ----------
+{ echo "TRAIN_RC=$rc $(date '+%F %T')" ;
+  tail -40 $L/master.log ;
+  echo "=== EPOCH CHECKPOINT HASHES $RUN ===" ;
+  sha256sum $OUT/checkpoint-*/model*.safetensors $OUT/model*.safetensors 2>/dev/null | sort -k2 ;
+} 2>&1 | tee -a $L/job.log
+if [ -f ~/.ossutilconfig ] ; then
+  for f in $OUT/trainer_state.json $OUT/all_results.json $OUT/train_results.json \
+           $OUT/resolved_config.json $OUT/length_policy_plan.json ; do
+    [ -f "$f" ] && ossutil64 cp -f "$f" oss://$OSSB/$OSSROOT/run/
+  done
+  ossutil64 cp -f -r $L/ oss://$OSSB/$OSSROOT/logs/ || echo "日志传 OSS 失败,本地那份仍在 $L" | tee -a $L/job.log
+  echo "产物:oss://$OSSB/$OSSROOT/  本地:$OUT  日志:$L" | tee -a $L/job.log
+fi
+echo "===TRAIN-END=== $(date '+%F %T')" | tee -a $L/job.log
+exit $rc

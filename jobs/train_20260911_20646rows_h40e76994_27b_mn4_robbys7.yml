@@ -1,0 +1,116 @@
+#### 27B 4-node 全量 SFT,数据集 20260911_20646rows_h40e76994,--recipe 入口版
+#
+# 2026-09-12:从 archive/jobs/train_multi_lcyfull_base27b_mn4_noovl_gbl_robbys7.yml(record 337167030,
+# 现役 run,旧 CLI)派生。rendezvous / 环境 / 校验段一字不动,只把 torchrun 那一行的训练参数换成
+# --recipe:training/train_sft.py --recipe configs/recipes/sft_20260911_20646rows_h40e76994_27b_mn4.yaml
+# --model $BASE --data-manifest $DM --output $OUT(recipe 里的键就是那一行逐项翻译,见 recipe 注释)。
+# 前提:$P/repo_sft 更新到含 --recipe 入口的 commit(merge-lcy-dev 之后),recipe 里的
+# sampling_strategy: length_grouped 与 loss_normalization 两个键在 training/ 里落地。
+#
+# 数据门:manifest(v2 选择清单,记源 jsonl 的相对路径 + 行 offset,不记源文件 hash;导入端也不查
+# 源文件 hash)由另一条线生成,DM 指向它。这里**保留对源 jsonl 的 sha 校验**(DS / DS_SHA 与现役 run
+# 相同)当数据门,只对 manifest 做存在性 + version 2 检查;manifest 定稿后把 DM_SHA 填上打开那一道门
+# (train_sft 会把 manifest 与 recipe 的 sha256 写进 $OUT/resolved_config.json)。manifest 的 base_root
+# 相对 manifest 目录,pod 与 s3 挂的是同一块 CPFS,应能直接解析;解析不到再加 --data-root。
+# CPFS 目录暂不改名:DS 所在的 lcy_data/ 将来是 data_20260911_20646rows_h40e76994/。
+#
+# 配方沿革(数字全部不变):
+# 2026-09-12:第一版(record 337087203)随机分 batch 每步 92 到 104 s(每步最长行平均 11.5 万 token,
+# 行均值 3.8 万),全程要 50 小时;用户拍板改按长度分组 batch 重发(record 337167030,29 s/it)。
+# 2026-09-11:数据换成 RT3 harness 采的全量语料(按 turn 一行,采集时录下来的 recorded_decision_request
+# 原样训,不投影;合成与 provenance 见 data_pipeline/build_rt3_train_set.py 与
+# registry/sft_20260911_20646rows_h40e76994_27b.yaml)。为了不丢长行 max_input_tokens 196608,
+# 只对监督位置算 logits(4 node 显存 smoke jobs/smoke_20260911_20646rows_h40e76994_len196608_robbys7.yml
+# 通过是发射前置门)。基座 / lr 2e-5 / gbs 32 / 3 epochs / ZeRO-3 overlap_comm=false / tilelang nopch /
+# save-steps = 每 epoch 步数 全部照抄 mn4c_noovl。
+# 数据:train_le196608.jsonl 20646 行(全量 20651 行丢 5 行 place_shoe 超限),sha f3499c08…;
+# 每 epoch 646 步(ceil(20646/32)),3 epochs 1938 步。token p50 28k / p90 78k / p99 128k / max 207k。
+
+k8s_app_name: robbys7
+k8s_priority: high
+gpu_type: b300
+node_num: 4
+communication_network_card: 'eth0'
+gpu_per_node: 8
+cpu_per_gpu: 12
+memory_per_gpu: 140G
+disk_memory: 200G
+shared_memory: 100G
+
+data_stores:
+    store0:
+        mount_point: /robby/share/s7
+        store_name: et210-aidc-robby-cpfs
+        sub_path: /
+
+repo_url: https://code.alipay.com/lingcong.hyb/LDA-1B-clean
+branch: main
+
+image: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/aii/aistudio:19340163-20260724200505
+runtime: pytorch
+# 多节点 master IP:port 交换目录。robbyctl 默认 /personal/job_id_cache,而 robbys7
+# 没登记 PERSONAL_STORE_MAP,pod 里 /personal 是本地空目录,worker 看不到 master
+# 写的文件 → mn/mn4/mn4b/mn4c/mn4d 五次全部 1/N joined。指到自己挂的 CPFS。
+job_id_cache_dir: /robby/share/s7/lingcong.hyb/.robbyctl_job_cache
+job_name: sft-20260911-20646rows-h40e76994-27b-mn4
+tag: type=train,ckpt=sft-20260911-20646rows-h40e76994-27b-mn4,lr=sqrt-scaled,proto=rt3-atomic,cluster=robbys7,ds=zero3,nodes=4,data=20260911_20646rows_h40e76994,sampler=length_grouped,entry=recipe
+
+command: |
+  # ---------- 1. 路径与数据身份 ----------
+  # DS/DM 是数据门要校的两样;OUT 必须是空目录(见第 3 段最后一条)。
+  export P=/robby/share/s7/lingcong.hyb/ppc_overfit_20260810 ;
+  export REPO=$P/repo_sft ;   # 训练代码用本 repo 的副本,必须是含 --recipe 入口的 commit(merge-lcy-dev 之后)
+  export OUT=$P/checkpoints/sft_20260911_20646rows_h40e76994_27b_mn4 ;
+  export BASE=$P/base_models/Qwen3.8-27B ;
+  export L=$P/logs/train_20260911_20646rows_h40e76994_27b_mn4 ; mkdir -p $L ;
+  export DS=/robby/share/s7/lingcong.hyb/lcy_data/lcy_full_20260911/sft/lcy_full_20260911/train_le196608.jsonl ;
+  export DS_SHA=f3499c080842e5289785ffb3be1e5567f27c70a6824a0872750484216c96fa35 ;
+  export DM=/robby/share/s7/lingcong.hyb/ppc_overfit_20260810/data/manifests/20260911_20646rows_h40e76994.manifest.json ;
+  export DM_SHA= ;   # manifest 定稿后填 sha256;空 = 只查存在性与 version(数据门仍由上面 DS_SHA 承担)
+  export RECIPE=$P/repo_sft/configs/recipes/sft_20260911_20646rows_h40e76994_27b_mn4.yaml ;
+  # ---------- 2. 运行环境:镜像修复 + sm_103 工具链 + 确定性 ----------
+  # compat 目录会让容器里的 driver shim 盖掉宿主驱动;CUDA_* 一律 unset 交给镜像自己解析。
+  # NVRTC 走 qwendeps 里那份 12.x:LD_LIBRARY_PATH 管编译期查找,LD_PRELOAD 管运行期优先级,两道都要。
+  # FLASH_ATTENTION_DETERMINISTIC 与 CUBLAS_WORKSPACE_CONFIG 是 recipe 里 deterministic: true 的前提。
+  mv /usr/local/cuda/compat /usr/local/cuda/compat.disabled 2>/dev/null && echo "compat disabled" || echo "compat already gone" ;
+  unset PYTHONPATH CUDA_HOME CUDA_PATH CUDA_BIN_PATH CUDACXX ;
+  export LD_LIBRARY_PATH=$P/qwendeps/qwen35-fla/nvidia/cuda_nvrtc/lib ;
+  export TRITON_LIBCUDA_PATH=/usr/lib/x86_64-linux-gnu ;
+  export LD_PRELOAD=$P/qwendeps/qwen35-fla/nvidia/cuda_nvrtc/lib/libnvrtc.so.12 ;
+  export TORCH_CUDA_ARCH_LIST="10.0+PTX" ;
+  export TRITON_PTXAS_PATH=$P/qwendeps/qwen35-fla/nvidia/cuda_nvcc/bin/ptxas ;
+  mkdir -p /root/.cache/torch/kernels ; cp -n $P/torchkernels/* /root/.cache/torch/kernels/ 2>/dev/null ;
+  export PYTHONPATH=$P/qwendeps/qwen35-fla:$P/qwendeps/qwen35-train:$REPO ;
+  export ENABLE_MY_GLOBAL_HOOK=0 ENABLE_MY_FLASH_ATTN_HOOK=0 USE_TF=0 ;
+  export HF_HOME=/root/hf TORCH_EXTENSIONS_DIR=/root/te TORCHINDUCTOR_CACHE_DIR=/root/ti TRITON_CACHE_DIR=/root/tc ;
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True WANDB_MODE=disabled ;
+  export FLASH_ATTENTION_DETERMINISTIC=1 ;
+  export CUBLAS_WORKSPACE_CONFIG=:4096:8 ;
+  # ---------- 3. 发射前校验门 ----------
+  # 12 道检查(数据 sha、首图可读、manifest v2、基座 model_type、训练代码血统、输出目录是新的…),
+  # 任何一条不过就非零退出。逐条理由见脚本里的注释。
+  echo ===TRAIN-START=== ;
+  env | grep -aE "MASTER|NODE|RANK|WORLD|PET_" | sort > $L/env_$(hostname).txt ;
+  nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | head -1 ;
+  ls $REPO/jobs/tools/preflight_train.sh || { echo "repo 副本里没有 preflight_train.sh" ; exit 2 ; } ;
+  bash $REPO/jobs/tools/preflight_train.sh || exit $? ;
+
+  # ---------- 4. 多节点 rendezvous ----------
+  # 定出本 pod 的 NR(node_rank)与 MA(master IP)。优先用调度器给的 NODE_RANK/MASTER_IP,
+  # 拿不到就退回 CPFS 目录登记法。
+  cd $REPO ;
+  set -o pipefail ;
+  NODES=4 ;
+  eval "$(NODES=$NODES L=$L bash $REPO/jobs/tools/rendezvous.sh)" || exit $? ;
+  if [ "$NR" = "0" ] ; then TLOG=$L/master.log ; else TLOG=$L/worker-${NR}.log ; fi ;
+
+  # ---------- 5. 发射:rank 0 写 master.log,其余写 worker-N.log ----------
+  /usr/bin/python3 -m torch.distributed.run --nnodes=$NODES --node_rank=$NR --rdzv_backend=static --master_addr=$MA --master_port=${MASTER_PORT:-29500} --max-restarts=0 --nproc_per_node=8 training/train_sft.py --recipe $RECIPE --model $BASE --data-manifest $DM --output $OUT --run-name sft_20260911_20646rows_h40e76994_27b_mn4 > $TLOG 2>&1 ;
+  rc=$? ;
+  # ---------- 6. 收尾:回显退出码,打印每个 epoch checkpoint 的 sha 供复现对账 ----------
+  echo "TRAIN_RC=$rc" ;
+  tail -40 $TLOG ;
+  echo "=== EPOCH CHECKPOINT HASHES sft_20260911_20646rows_h40e76994_27b_mn4 ===" ;
+  sha256sum $OUT/checkpoint-*/model.safetensors $OUT/model.safetensors 2>/dev/null | sort -k2 ;
+  echo ===TRAIN-END===
+  exit $rc

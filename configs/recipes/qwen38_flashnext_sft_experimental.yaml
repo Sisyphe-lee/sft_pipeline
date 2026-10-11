@@ -1,0 +1,30 @@
+# Experimental: GPU kernel and full-model acceptance remain outstanding.
+# Same data/loss semantics as 9B; separate full-language BF16 model path via CLI.
+learning_rate: 1.0e-5
+warmup_ratio: 0.05
+max_grad_norm: 1.0
+num_train_epochs: 5.0
+max_steps: -1
+global_batch_size: 32
+max_input_tokens: 196608
+truncate_history: false
+freeze_vision: true
+lora: false
+gradient_checkpointing: true
+attn_implementation: sdpa
+zero3_init: true
+flashnext_qsa: true
+deepspeed: ../training/qwen3_5_sft_zero3_noovl.json
+sampling_strategy: length_grouped
+loss_normalization: turn_mean
+seed: 3407
+validation: false
+report_to: wandb
+logging_steps: 1
+save_strategy: epoch
+save_total_limit: 5
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 2
+# Miles sparse backward uses atomics; do not claim deterministic execution.
+deterministic: false
+hard_exit_after_train: true

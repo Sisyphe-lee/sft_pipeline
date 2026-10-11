@@ -1,0 +1,166 @@
+@HEADLINE@
+#
+# 本文件由 jobs/tools/make_train_job.sh 套 jobs/templates/train_sft_mn4.yml.tmpl 生成,不要手改 ——
+# 要改改模板。
+#
+# 代码来源:repo_url 指本 repo,平台 clone 到 /workspace/bin/<repo 名> 并 cd 进去再执行 command
+# (robbyctl/remote/launch.py 的 CODE_PATH),所以 command 开头的 $PWD 就是这次要跑的代码。
+# 2026-09-16 diag(record 338421419)实测 PWD=/workspace/bin/physicalagent-sft-pipeline。
+# branch / commit_id 由 make_train_job.sh 填:branch 默认是生成时所在的 git 分支(--branch 可指定),
+# commit_id 默认空 = 取该分支在 origin 上的 HEAD(--commit 可钉死)。所以提交前要 push;生成器会核
+# 本地 HEAD 和 origin/<branch> 是否一致。pod 里实际跑的 commit 会打进 job.log。
+#
+# 镜像 19900157-20260915210256。同一次 diag 验过:自带 torch 2.8.0+cu128 / flash_attn 2.8.3 /
+# triton 3.4.0 / nvrtc 12.8 / ptxas 12.8,没有 compat 目录;CPFS 上 pin 的 transformers 5.14.1 /
+# trl / accelerate / deepspeed / fla 在它上面都起得来;四条 CUDA 路径全过。老镜像那套修复里,搬
+# compat、TRITON_PTXAS_PATH、预热 torch kernel cache 确实不需要了;LD_PRELOAD 那条是镜像自己
+# 在 ENV 里带着(见第 2 段),所以这里不写、也不 unset。
+
+k8s_app_name: robbys7
+k8s_priority: high
+gpu_type: b300
+node_num: @NODES@
+communication_network_card: 'eth0'
+gpu_per_node: 8
+cpu_per_gpu: 12
+memory_per_gpu: 140G
+disk_memory: 200G
+shared_memory: 100G
+
+data_stores:
+    store0:
+        mount_point: /robby/share/s7
+        store_name: et210-aidc-robby-cpfs
+        sub_path: /
+
+repo_url: https://code.alipay.com/lingcong.hyb/physicalagent-sft-pipeline
+branch: @BRANCH@
+commit_id: @COMMIT_ID@
+
+image: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/aii/aistudio:19900157-20260915210256
+runtime: pytorch
+# 多节点 master IP:port 交换目录。robbys7 没登记 PERSONAL_STORE_MAP,pod 里 /personal 是本地
+# 空目录,worker 看不到 master 写的文件;指到自己挂的 CPFS。
+job_id_cache_dir: /robby/share/s7/lingcong.hyb/.robbyctl_job_cache
+job_name: @JOB_NAME@
+tag: @TAG@
+
+command: |
+  # ---------- 1. 路径与数据身份 ----------
+  export P=/robby/share/s7/lingcong.hyb/ppc_overfit_20260810 ;
+  export REPO=$PWD ;
+  export RUN=@RUN@ ;
+  # OUT / LOG 的根、manifest 的整条路径、训练输入 jsonl 都由 make_train_job.sh 填(见 README.md)。
+  # pod 把这块 CPFS 的根挂在 /robby/share/s7,所以 3D 盘在 pod 里是 /robby/share/s7/3D/…
+  # (= 交互式容器里的 /robby/share/3D),要把产物直接落到 3D 就填那条路径。
+  export OUT=@OUT_ROOT@/$RUN ;
+  export L=@LOG_ROOT@/train_@RUN_SHORT@ ; mkdir -p $L ;
+  export BASE=$P/@BASE@ ;
+  # DS / DS_SHA:单一 source 的老数据集才给;多 source 数据直接按 manifest 读取(见 preflight)
+  export DS=@DS@ ;
+  export DS_SHA=@DS_SHA@ ;
+  export DM=@DM_PATH@ ;
+  export DM_SHA=@DM_SHA@ ;
+  export DATA_ROOT=@DATA_ROOT@ ;
+  export RECIPE=$REPO/configs/recipes/@RECIPE_FILE@ ;
+  export OSSB=antsys-robbys3-prod ;
+  export OSSROOT=lingcong/output/harness/$RUN ;
+  # 续训:make_train_job.sh --resume 填这里(空 = 从头训)。preflight 用它放行已存在的 $OUT,
+  # train_sft 用它恢复 optimizer / scheduler / rng,resolved_config.json 会逐字段核对配置没变。
+  export RESUME_FROM=@RESUME_FROM@ ;
+  ls $REPO/training/train_sft.py $REPO/jobs/tools/preflight_train.sh >/dev/null \
+    || { echo "clone 下来的不是本 repo:$REPO" ; exit 2 ; } ;
+  echo "CODE_COMMIT=$(git -C $REPO rev-parse HEAD 2>/dev/null || echo no-git) REPO=$REPO" | tee -a $L/job.log ;
+
+  # ---------- 2. 运行环境 ----------
+  # 训练依赖(transformers 5.14.1 等)pin 在 CPFS 的 qwendeps,靠 PYTHONPATH 盖住镜像自带的;
+  # 这是和现役 20646 行那轮对齐的关键,不动。FLASH_ATTENTION_DETERMINISTIC 与
+  # CUBLAS_WORKSPACE_CONFIG 是 recipe 里 deterministic: true 的前提。
+  # 只 unset PYTHONPATH 和 CUDA_*,**别碰 LD_* / TRITON_* / TORCH_CUDA_ARCH_LIST**:老 job 那套补丁
+  # (nvrtc 12.9 的 LD_LIBRARY_PATH + LD_PRELOAD、ptxas 12.9 的 TRITON_PTXAS_PATH、
+  # TORCH_CUDA_ARCH_LIST=10.0+PTX)被做进了镜像 ENV(值指向 /opt/qwendeps),这张卡(torch 报
+  # cc (10, 3))离了它们 nvrtc / ptxas 12.8 都不认 sm_103。pod 继承镜像 ENV,所以这里不写也不 unset;
+  # 见 jobs/templates/train_sft_s3.sh.tmpl 里逐行照抄的那几行。
+  unset PYTHONPATH CUDA_HOME CUDA_PATH CUDA_BIN_PATH CUDACXX ;
+  export PYTHONPATH=$P/qwendeps/qwen35-fla:$P/qwendeps/qwen35-train:$REPO ;
+  export TORCH_CUDA_ARCH_LIST="10.0+PTX" ;
+  export TRITON_LIBCUDA_PATH=/usr/lib/x86_64-linux-gnu ;
+  export ENABLE_MY_GLOBAL_HOOK=0 ENABLE_MY_FLASH_ATTN_HOOK=0 USE_TF=0 ;
+  export HF_HOME=/root/hf TORCH_EXTENSIONS_DIR=/root/te TORCHINDUCTOR_CACHE_DIR=/root/ti TRITON_CACHE_DIR=/root/tc ;
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ;
+  export FLASH_ATTENTION_DETERMINISTIC=1 ;
+  export CUBLAS_WORKSPACE_CONFIG=:4096:8 ;
+  # oss2 给 checkpoint 传 OSS 用,wandb 给 W&B 用。launcher 装 oss_manager 那一步在 robbys7 上
+  # 拿不到 wheel(403),所以 oss2 不能指望它带进来;不在就装,在就什么都不做。
+  /usr/bin/python3 -c "import oss2, wandb" 2>/dev/null || pip install -q oss2 wandb ;
+  # W&B:照 hjy 的六行来(他那份就是在这个平台上跑通的),key 由生成时的环境变量注入。
+  # 无条件覆盖、先 unset,不写 ${VAR:-默认}:第一次 smoke(record 338621352)report_to 是 wandb、
+  # rc=0,却一行 wandb 输出都没有、$OUT/wandb/ 也不存在,和 pod 预置了 WANDB_MODE=disabled 或
+  # WANDB_DISABLED 的症状一模一样;hjy 多的那一步 wandb login 也照做。
+  unset WANDB_DISABLED WANDB_SILENT ;
+  export WANDB_API_KEY=@WANDB_API_KEY@ ;
+  export WANDB_BASE_URL=http://33.180.4.104 ;
+  export WANDB_ENTITY=@WANDB_ENTITY@ ;
+  export WANDB_PROJECT=@WANDB_PROJECT@ ;
+  export WANDB_MODE=online ;
+  export WANDB_DIR=$OUT ;
+  if [ -n "$RESUME_FROM" ] ; then
+    # 续训接着原来那个 W&B run 画,不另开:run id 就在 $OUT/wandb/run-<时间>-<id>/ 的目录名里
+    WID=$(ls -d $OUT/wandb/run-*-* 2>/dev/null | tail -1 | sed -E 's/.*-([a-z0-9]+)$/\1/') ;
+    [ -n "$WID" ] && export WANDB_RUN_ID=$WID WANDB_RESUME=allow ;
+    echo "续训:W&B run id ${WID:-没找到,会另开一个}" | tee -a $L/job.log ;
+  fi ;
+  wandb login --host="$WANDB_BASE_URL" 2>&1 | tee -a $L/job.log ;
+  env | grep -aE "^WANDB_" | sed -E "s/(KEY)=.*/\1=<set>/" | sort | tee -a $L/job.log ;
+  # OSS:launcher 用你 ~/.robbyctl/user_config.yml 里 robbys7 的 oss_domain 写 ~/.ossutilconfig,
+  # 那是**公网** endpoint(oss-cn-shanghai.aliyuncs.com),bucket policy 拒绝(第一次 smoke 里
+  # 每个文件都是 403 AccessDenied "Access denied by bucket policy")。集群内要走内网 endpoint,
+  # 和 s3 上传 ep3 用的 antsys-robbys3-prod-internal 那份 config 一样。只改 endpoint 那一行,
+  # AK/SK 原样不动。
+  export OSS_ENDPOINT=oss-cn-shanghai-internal.aliyuncs.com ;
+  [ -f ~/.ossutilconfig ] && sed -i -E "s#^endpoint=.*#endpoint=$OSS_ENDPOINT#" ~/.ossutilconfig ;
+  grep -aE "^endpoint=" ~/.ossutilconfig 2>/dev/null | tee -a $L/job.log || echo "没有 ~/.ossutilconfig,launcher 没配 OSS?" | tee -a $L/job.log ;
+  /usr/bin/python3 -c "import sys,torch,transformers,flash_attn,triton,oss2,wandb;print('STACK python',sys.version.split()[0],'torch',torch.__version__,'cuda',torch.version.cuda,'transformers',transformers.__version__,'flash_attn',flash_attn.__version__,'triton',triton.__version__,'oss2',oss2.__version__,'wandb',wandb.__version__)" 2>&1 | tee -a $L/job.log ;
+
+  # ---------- 3. 发射前校验门 ----------
+  # 12 道检查(数据 sha、首图可读、manifest sha、基座 model_type、训练代码血统、输出目录是新的…),
+  # 任何一条不过就非零退出。输出落 CPFS:它带着数据集 sha,是复现对账最要紧的一份。
+  # 用 > 文件再 cat,不用管道接 tee —— 管道会让 $? 变成 tee 的退出码,门就形同虚设。
+  echo "===TRAIN-START=== $(date '+%F %T')" | tee -a $L/job.log ;
+  env | grep -aE "MASTER|NODE|RANK|WORLD|PET_" | sort > $L/env_$(hostname).txt ;
+  nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | head -1 | tee -a $L/job.log ;
+  bash $REPO/jobs/tools/preflight_train.sh > $L/preflight_$(hostname).log 2>&1 ; prc=$? ;
+  cat $L/preflight_$(hostname).log ; cat $L/preflight_$(hostname).log >> $L/job.log ;
+  [ $prc -eq 0 ] || exit $prc ;
+
+  # ---------- 4. 多节点 rendezvous ----------
+  cd $REPO ;
+  set -o pipefail ;
+  NODES=@NODES@ ;
+  eval "$(NODES=$NODES L=$L bash $REPO/jobs/tools/rendezvous.sh)" || exit $? ;
+  if [ "$NR" = "0" ] ; then TLOG=$L/master.log ; else TLOG=$L/worker-${NR}.log ; fi ;
+  # 日志用追加:续训时前面那段要留着,两段之间打一条分界。
+  [ -n "$RESUME_FROM" ] && echo "===== RESUME $(date '+%F %T') from $RESUME_FROM =====" >> $TLOG ;
+
+  # ---------- 5. 发射:rank 0 写 master.log,其余写 worker-N.log ----------
+  /usr/bin/python3 -m torch.distributed.run --nnodes=$NODES --node_rank=$NR --rdzv_backend=static --master_addr=$MA --master_port=${MASTER_PORT:-29500} --max-restarts=0 --nproc_per_node=8 training/train_sft.py --recipe $RECIPE --model $BASE --data-manifest $DM --data-root $DATA_ROOT --output $OUT --run-name $RUN --oss-root $OSSROOT ${RESUME_FROM:+--resume-from-checkpoint $RESUME_FROM} >> $TLOG 2>&1 ;
+  rc=$? ;
+
+  # ---------- 6. 收尾:退出码、每个 checkpoint 的 sha,落 CPFS 再连日志一起传 OSS ----------
+  { echo "TRAIN_RC=$rc $(date '+%F %T')" ;
+    tail -40 $TLOG ;
+    echo "=== EPOCH CHECKPOINT HASHES $RUN ===" ;
+    sha256sum $OUT/checkpoint-*/model*.safetensors $OUT/model*.safetensors 2>/dev/null | sort -k2 ;
+  } 2>&1 | tee -a $L/job.log ;
+  # checkpoint 由 training/oss_checkpoint.py 在每次 save 时就传了,这里补日志与几份小产物。
+  # 只 rank 0 传,凭据用 launcher 配好的 ~/.ossutilconfig。传失败只打一行,不改 $rc。
+  if [ "$NR" = "0" ] ; then
+    for f in $OUT/trainer_state.json $OUT/all_results.json $OUT/train_results.json \
+             $OUT/resolved_config.json $OUT/length_policy_plan.json ; do
+      [ -f "$f" ] && ossutil64 cp -f "$f" oss://$OSSB/$OSSROOT/run/ ;
+    done ;
+    ossutil64 cp -f -r $L/ oss://$OSSB/$OSSROOT/logs/ || echo "日志传 OSS 失败,本地那份仍在 $L" | tee -a $L/job.log ;
+    echo "产物:oss://$OSSB/$OSSROOT/  本地:$OUT  日志:$L" | tee -a $L/job.log ;
+  fi ;
+  echo "===TRAIN-END=== $(date '+%F %T')" | tee -a $L/job.log
+  exit $rc

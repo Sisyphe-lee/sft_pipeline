@@ -1,0 +1,18 @@
+{
+  "bf16": {
+    "enabled": true,
+    "check_grad_overflow": true
+  },
+  "zero_optimization": {
+    "stage": 2,
+    "overlap_comm": false,
+    "contiguous_gradients": true,
+    "reduce_scatter": true
+  },
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "steps_per_print": 1000,
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": 1,
+  "wall_clock_breakdown": false
+}

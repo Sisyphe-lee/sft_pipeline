@@ -1,0 +1,105 @@
+#### 4 node 显存 smoke(--recipe 入口版):20260911_20646rows_h40e76994 最长 8 行,196608 上限,2 步
+#
+# 2026-09-12:合并 lcy-dev 之后的训练入口第一次上 4 node,代码指 CPFS 上合并分支的 checkout
+# $P/repo_sft_merge(merge 进 main 前先验),recipe 同正式训练,步数用 CLI 覆盖(--max-steps 2)。
+# 看 PRINT_PEAK_MEM 的峰值显存(旧 CLI 同数据 206 GB)与步时;跑完删 OUT。
+k8s_app_name: robbys7
+k8s_priority: high
+gpu_type: b300
+node_num: 4
+communication_network_card: 'eth0'
+gpu_per_node: 8
+cpu_per_gpu: 12
+memory_per_gpu: 140G
+disk_memory: 200G
+shared_memory: 100G
+
+data_stores:
+    store0:
+        mount_point: /robby/share/s7
+        store_name: et210-aidc-robby-cpfs
+        sub_path: /
+
+repo_url: https://code.alipay.com/lingcong.hyb/LDA-1B-clean
+branch: main
+
+image: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/aii/aistudio:19340163-20260724200505
+runtime: pytorch
+# 多节点 master IP:port 交换目录。robbyctl 默认 /personal/job_id_cache,而 robbys7
+# 没登记 PERSONAL_STORE_MAP,pod 里 /personal 是本地空目录,worker 看不到 master
+# 写的文件 → mn/mn4/mn4b/mn4c/mn4d 五次全部 1/N joined。指到自己挂的 CPFS。
+job_id_cache_dir: /robby/share/s7/lingcong.hyb/.robbyctl_job_cache
+job_name: smoke-20260911-20646rows-h40e76994-len196608-recipe
+tag: type=smoke,ckpt=sft-20260911-20646rows-h40e76994-27b-mn4,lr=sqrt-scaled,proto=rt3-atomic,cluster=robbys7,ds=zero3,nodes=4,data=20260911_20646rows_h40e76994,sampler=length_grouped,entry=recipe
+
+command: |
+  export P=/robby/share/s7/lingcong.hyb/ppc_overfit_20260810 ;
+  export REPO=$P/repo_sft_merge ;   # 合并分支在 CPFS 上的 checkout(merge 进 main 前先用它验)   # 训练代码用本 repo 的副本,必须是含 --recipe 入口的 commit(merge-lcy-dev 之后)
+  export OUT=$P/checkpoints/_smoke_20260911_20646rows_h40e76994_len196608_recipe ;
+  export BASE=$P/base_models/Qwen3.8-27B ;
+  export L=$P/logs/smoke_20260911_20646rows_h40e76994_len196608_recipe ; mkdir -p $L ; export PRINT_PEAK_MEM=1 ;
+  export DS=/robby/share/s7/lingcong.hyb/lcy_data/lcy_full_20260911/sft/lcy_full_20260911/longest8_le196608.jsonl ;
+  export DS_SHA=be10e11407831a364793c802317b5a3b64f1e4ef0be9cba46fc750fd8e5fa5df ;
+  export DM=/robby/share/s7/lingcong.hyb/ppc_overfit_20260810/data/manifests/smoke_longest8.manifest.json ;
+  export DM_SHA= ;   # manifest 定稿后填 sha256;空 = 只查存在性与 version(数据门仍由上面 DS_SHA 承担)
+  export RECIPE=$P/repo_sft_merge/configs/recipes/sft_20260911_20646rows_h40e76994_27b_mn4.yaml ;
+  mv /usr/local/cuda/compat /usr/local/cuda/compat.disabled 2>/dev/null && echo "compat disabled" || echo "compat already gone" ;
+  unset PYTHONPATH CUDA_HOME CUDA_PATH CUDA_BIN_PATH CUDACXX ;
+  export LD_LIBRARY_PATH=$P/qwendeps/qwen35-fla/nvidia/cuda_nvrtc/lib ;
+  export TRITON_LIBCUDA_PATH=/usr/lib/x86_64-linux-gnu ;
+  export LD_PRELOAD=$P/qwendeps/qwen35-fla/nvidia/cuda_nvrtc/lib/libnvrtc.so.12 ;
+  export TORCH_CUDA_ARCH_LIST="10.0+PTX" ;
+  export TRITON_PTXAS_PATH=$P/qwendeps/qwen35-fla/nvidia/cuda_nvcc/bin/ptxas ;
+  mkdir -p /root/.cache/torch/kernels ; cp -n $P/torchkernels/* /root/.cache/torch/kernels/ 2>/dev/null ;
+  export PYTHONPATH=$P/qwendeps/qwen35-fla:$P/qwendeps/qwen35-train:$REPO ;
+  export ENABLE_MY_GLOBAL_HOOK=0 ENABLE_MY_FLASH_ATTN_HOOK=0 USE_TF=0 ;
+  export HF_HOME=/root/hf TORCH_EXTENSIONS_DIR=/root/te TORCHINDUCTOR_CACHE_DIR=/root/ti TRITON_CACHE_DIR=/root/tc ;
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True WANDB_MODE=disabled ;
+  export FLASH_ATTENTION_DETERMINISTIC=1 ;
+  export CUBLAS_WORKSPACE_CONFIG=:4096:8 ;
+  echo ===TRAIN-START=== ;
+  env | grep -aE "MASTER|NODE|RANK|WORLD|PET_" | sort > $L/env_$(hostname).txt ;
+  nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | head -1 ;
+  # 数据在另一块目录(长坤 registry 的自有拷贝),pod 挂载名与 s3 的
+  # /personal 不同 —— 存在性与首图可见性都实测,不靠推断。
+  ls -d $DS || { echo "数据集在 pod 上不可见:$DS" ; exit 2 ; } ;
+  GOT=$(sha256sum $DS | cut -d' ' -f1) ; echo "dataset sha: $GOT" ;
+  [ "$GOT" = "$DS_SHA" ] || { echo "数据集 sha 不符,期望 $DS_SHA" ; exit 2 ; } ;
+  /usr/bin/python3 -c "import json,os,sys; row=json.loads(open(os.environ['DS']).readline()); img=os.path.join(os.path.dirname(os.environ['DS']),row['images'][0]); print('首图:',img); sys.exit(0 if os.path.isfile(img) else 9)" || { echo "首图不可见(artifact 相对路径在 pod 上解析失败)" ; exit 2 ; } ;
+  ls -d $DM || { echo "manifest 在 pod 上不可见:$DM" ; exit 2 ; } ;
+  /usr/bin/python3 -c "import json,os,sys; m=json.load(open(os.environ['DM'])); sys.exit(0 if m.get('version')==2 and m.get('train') else 9)" || { echo "manifest 不是 v2 选择清单或没有 train 行" ; exit 2 ; } ;
+  if [ -n "$DM_SHA" ] ; then GOTM=$(sha256sum $DM | cut -d' ' -f1) ; echo "manifest sha: $GOTM" ; [ "$GOTM" = "$DM_SHA" ] || { echo "manifest sha 不符,期望 $DM_SHA" ; exit 2 ; } ; fi ;
+  ls $RECIPE || { echo "recipe 不存在 $RECIPE" ; exit 2 ; } ;
+  ls -d $BASE || { echo "基座不存在 $BASE" ; exit 2 ; } ;
+  /usr/bin/python3 -c "import json,os,sys; c=json.load(open(os.environ['BASE']+'/config.json')); sys.exit(0 if c['model_type']=='qwen3_5' else 9)" || { echo "基座 model_type 不是 qwen3_5" ; exit 2 ; } ;
+  ls $REPO/training/deterministic.py || exit 2 ;
+  grep -q _patch_causal_conv1d_torch_fallback $REPO/training/deterministic.py || { echo "deterministic.py 不是 torch-conv 版(parity 血统),拒绝开训" ; exit 2 ; } ;
+  grep -q _hf_set_seed $REPO/training/train_sft.py || { echo "train_sft.py 缺 peft 前置 seed 修复(repo 副本过旧)" ; exit 2 ; } ;
+  grep -q -- "--recipe" $REPO/training/train_sft.py || { echo "train_sft.py 没有 --recipe 入口(repo 副本还是 merge-lcy-dev 之前的)" ; exit 2 ; } ;
+  [ -e "$OUT" ] && { echo "refusing non-fresh output: $OUT" ; exit 3 ; } ;
+  /usr/bin/python3 -c "import torch;print('cuda avail', torch.cuda.is_available(), torch.cuda.device_count())" ;
+  cd $REPO ;
+  set -o pipefail ;
+  NODES=4 ; H=$(hostname) ;
+  MYIP=$(ip -4 -o addr show eth0 2>/dev/null | awk "{print \$4}" | cut -d/ -f1) ; [ -n "$MYIP" ] || MYIP=$(hostname -I 2>/dev/null | awk "{print \$1}") ;
+  [ -n "$MYIP" ] || { echo "拿不到本机 eth0 IP" ; exit 4 ; } ;
+  if [ -n "${NODE_RANK:-}" ] && [ -n "${MASTER_IP:-${MASTER_ADDR:-}}" ] ; then
+    NR=$NODE_RANK ; MA=${MASTER_IP:-$MASTER_ADDR} ; SRC=ais ;
+  else
+    mkdir -p $L/nodes ; echo "$MYIP" > $L/nodes/$H ;
+    n=0 ; for i in $(seq 1 180) ; do n=$(ls $L/nodes | wc -l) ; [ "$n" -ge "$NODES" ] && break ; sleep 5 ; done ;
+    [ "$n" -ge "$NODES" ] || { echo "rendezvous: 15 分钟只登记了 $n/$NODES 个 node:$(ls $L/nodes | tr "\n" " ")" ; exit 4 ; } ;
+    NR=$(( $(ls $L/nodes | sort | grep -n "^$H\$" | cut -d: -f1) - 1 )) ;
+    MA=$(cat $L/nodes/$(ls $L/nodes | sort | head -1)) ; SRC=cpfs ;
+  fi ;
+  echo "node_rank=$NR hostname=$H ip=$MYIP master=$MA rdzv_src=$SRC nodes=$(ls $L/nodes 2>/dev/null | sort | tr "\n" " ")" | tee -a $L/env_$H.txt ;
+  if [ "$NR" = "0" ] ; then TLOG=$L/master.log ; else TLOG=$L/worker-${NR}.log ; fi ;
+  /usr/bin/python3 -m torch.distributed.run --nnodes=$NODES --node_rank=$NR --rdzv_backend=static --master_addr=$MA --master_port=${MASTER_PORT:-29500} --max-restarts=0 --nproc_per_node=8 training/train_sft.py --recipe $RECIPE --model $BASE --data-manifest $DM --output $OUT --run-name sft_20260911_20646rows_h40e76994_27b_mn4 --max-steps 2 --save-steps 100000 > $TLOG 2>&1 ;
+  rc=$? ;
+  echo "TRAIN_RC=$rc" ;
+  tail -40 $TLOG ;
+  echo "=== EPOCH CHECKPOINT HASHES sft_20260911_20646rows_h40e76994_27b_mn4 ===" ;
+  sha256sum $OUT/checkpoint-*/model.safetensors $OUT/model.safetensors 2>/dev/null | sort -k2 ;
+  rm -rf $OUT ;
+  echo ===TRAIN-END===
+  exit $rc

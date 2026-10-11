@@ -1,0 +1,45 @@
+# pipeline smoke 配方:1 node × 8 卡,3 步,第 2 步存一个 checkpoint。
+#
+# 只为在十几分钟内走完整条链并留下证据:读 manifest → length preflight → 训几步 →
+# 存 checkpoint → oss_checkpoint.py 把它传 OSS → W&B 在线记录 → 收尾把 log 传 OSS。
+# 配 data/manifests/smoke_pipeline16.manifest.json(6 task 子集里最短的 16 行)用。
+#
+# 从 sft_20260916_2158rows_6task90unit_h40e76994_mn4.yaml 派生,只改了这几个数:
+#   global_batch_size 32 → 8(1 node × 8 卡,gradient_accumulation_steps 仍是 1,
+#                            少于或多于 8 卡 train_sft 会报 global batch mismatch,有意的)
+#   num_train_epochs 10 → 1,max_steps 680 → 3,save_steps 68 → 2,save_total_limit 10 → 2
+#   warmup_ratio 0.05 → 0(3 步里 warmup 没有意义)
+# 上下文上限、deepspeed、length_grouped、turn_mean、deterministic、report_to、oss_bucket
+# 全部照抄 —— smoke 验的就是这套配置在新镜像上能不能整条走通。
+#
+# 它**不是**显存 smoke。显存 smoke 是 smoke_20260911_20646rows_h40e76994_len196608_robbys7
+# 那份(最长 8 行、4 node),两种 smoke 要的行正相反。
+
+learning_rate: 2e-05
+warmup_ratio: 0.0
+max_grad_norm: 1.0
+num_train_epochs: 1.0
+max_steps: 3
+global_batch_size: 8
+gradient_accumulation_steps: 1
+max_input_tokens: 196608
+truncate_history: false
+freeze_vision: true
+lora: false
+gradient_checkpointing: true
+attn_implementation: flash_attention_2
+deepspeed: ../training/qwen3_5_sft_zero3_noovl.json
+sampling_strategy: length_grouped
+loss_normalization: turn_mean
+seed: 3407
+validation: false
+report_to: wandb
+logging_steps: 1
+save_steps: 2
+save_total_limit: 2
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 2
+deterministic: true
+hard_exit_after_train: true
+oss_bucket: antsys-robbys3-prod
+oss_delete_local: false

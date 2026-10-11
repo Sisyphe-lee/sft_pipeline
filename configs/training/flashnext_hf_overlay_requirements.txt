@@ -1,0 +1,4 @@
+# Separate overlay on the tested 9B runtime; never install into the 9B environment.
+# Torch 2.8.0+cu128, TRL 1.9.1 and DeepSpeed 0.17.2 remain supplied by that runtime.
+transformers==5.16.0
+tokenizers==0.23.1

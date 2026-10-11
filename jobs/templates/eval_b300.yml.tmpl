@@ -1,0 +1,39 @@
+# One checkpoint, one 8-B300 node. Render placeholders before submission.
+# Image/runtime must pass multimodal serving and RoboTwin rendering smoke.
+k8s_app_name: robbys7
+k8s_priority: high
+gpu_type: b300
+node_num: 1
+communication_network_card: 'eth0'
+gpu_per_node: 8
+cpu_per_gpu: 24
+memory_per_gpu: 140G
+disk_memory: 200G
+shared_memory: 100G
+data_stores:
+  store0:
+    mount_point: /robby/share/s7
+    store_name: et210-aidc-robby-cpfs
+    sub_path: /
+repo_url: https://code.alipay.com/lingcong.hyb/physicalagent-sft-pipeline
+branch: '@SFT_BRANCH@'
+commit_id: '@SFT_COMMIT@'
+image: '@IMAGE@'
+runtime: pytorch
+job_name: '@RUN_NAME@'
+tag: type=eval,model=qwen35-9b,cluster=robbys7
+command: |
+  set -eu
+  export SFT_PIPELINE_COMMIT='@SFT_COMMIT@'
+  export PHYSICAL_AGENT_ROOT='@HARNESS_ROOT@'
+  export PHYSICAL_AGENT_COMMIT='@HARNESS_COMMIT@'
+  export EVAL_RUNTIME_ENV='@RUNTIME_ENV@'
+  export VLLM_PYTHON='@VLLM_PYTHON@'
+  export MODEL_CHECKPOINT='@CHECKPOINT@'
+  export PHYSICAL_AGENT_API_OPTIONS_FILE='@API_OPTIONS@'
+  export EVAL_RUN_NAME='@RUN_NAME@'
+  export EVAL_RUN_ROOT='@OUTPUT_ROOT@/reports'
+  export EVAL_DATA_ROOT='@OUTPUT_ROOT@/data'
+  export EVAL_SERVING_TP='@TP@'
+  export EVAL_WORKERS='@WORKERS@'
+  bash evaluation/run_node.sh '@SUITE@'
