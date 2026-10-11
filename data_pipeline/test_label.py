@@ -59,3 +59,22 @@ def test_a_probe_must_be_a_submit_command():
                answers=dict(fact_about_judge=True, candidate=False, built_to_answer=True, question_before=True, answer_used=True, left_on_probe=False))
     assert label.decide(a3, row, kinds, [11]) == ([10, 11, 12], [])
     assert label.decide(a3, row, kinds, [30])[1] == ["submit_step is not a submit command"]
+
+
+def test_where_a_pattern_is_asked_and_what_goes_into_one_request(tmp_path):
+    patterns = label.load_patterns()[1]
+    place = lambda kind, step, **facts: dict(id=f"{kind}-{step:04d}", src="rule", type=kind, step=step, steps=[step, step], facts=facts)  # noqa: E731
+    plain, noted = place("result", 12, round="agent-1", mark="below_best"), place("result", 30, round="agent-2", mark="new_best", reader_notes=[dict(type="unexpected", step=30)])
+    asked = lambda p: sorted(n for n in patterns if label.asked_at(patterns[n], p))  # noqa: E731
+    assert asked(plain) == ["A2", "A3", "B1"]  # C1 only where a reader saw an unexpected result
+    assert asked(noted) == ["A2", "A3", "C1"]  # no B1 where the result is the best so far: the files are the best version
+    places = [place("submit", 10, round="agent-1"), plain, place("set_aside", 14), place("submit", 29, round="agent-2"), noted, place("submit", 31, round="agent-3")]
+    names = lambda grouped: [[(p["id"], q["name"]) for p, q in pairs] for pairs in grouped]  # noqa: E731
+    first = [("submit-0010", "A4"), ("submit-0010", "L1"), ("result-0012", "A2"), ("result-0012", "A3"), ("set_aside-0014", "D2")]
+    assert patterns["B1"]["effort"] == "high"  # B1 needs careful reading: asked apart, in requests of its own effort
+    assert names(label.requests(tmp_path, places, patterns, set(patterns), 8)) == [first, [("result-0012", "B1")], [
+        ("submit-0029", "A4"), ("submit-0029", "L1"), ("result-0030", "A2"), ("result-0030", "A3"), ("result-0030", "C1"), ("submit-0031", "A4"), ("submit-0031", "L1")]]
+    same = dict(patterns, B1={k: v for k, v in patterns["B1"].items() if k != "effort"})
+    assert names(label.requests(tmp_path, places, same, set(patterns), 8))[0] == first[:4] + [("result-0012", "B1")] + first[4:]
+    assert len(label.requests(tmp_path, places, same, set(patterns), 4)) == 4  # a submission is not split, also when it is over the limit
+    assert [len(x) for x in label.requests(tmp_path, places, patterns, {"L1"}, 8)] == [1, 2]  # one edited pattern: only its questions

@@ -2,3 +2,6 @@
 patterns: []                                # 只标其中几个时写名字，如 [C1, D3]；空 = 全部
 readings: [timeline, ideas, surprises]      # 通读几遍、各用哪份 patterns/<name>-protocol.md；第一遍的结果给后面几遍参考
 per_url: 2                                  # 每个 Kimi 地址的并发请求数
+together: 8                                 # 一次请求最多问几个“位置 + pattern”；同一次提交的两个位置总在一次请求里
+judge_request: {reasoning_effort: low}      # 判定请求的附加参数。low 比默认的 high 快约 3 倍，抽查质量相当；个别 pattern 在自己的文件里写 effort: high
+read_request: {}                            # 通读请求的附加参数。通读用默认的 high：low 快约 4 倍，但报出的位置少三到四成

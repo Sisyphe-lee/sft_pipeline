@@ -31,14 +31,17 @@ class Model(BaseHTTPRequestHandler):
     def do_POST(self):
         sent = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         user = sent["messages"][1]["content"]
-        if "PATTERN\n" in user:  # a labelling question: say yes to C1 with a check at step 3, no to everything else
-            name = user.split("PATTERN\n")[1].split(":")[0]
-            Model.asked.append(name)
-            answer = {"answers": {}, "steps": {}}
-            if name == "C1":
-                answer = {"answers": {"against_expectation": True, "message_gives_cause": False, "ran_a_check": True, "check_can_answer": True,
-                                      "changed_before_check": False, "finding_from_check": True, "next_follows": True},
-                          "steps": {"result_step": 2, "check_step": 3, "finding_step": 4}}
+        if "PLACES\n" in user:  # labelling questions: say yes to C1 with a check at step 3, no to everything else
+            answer = {"results": []}
+            for place in json.loads(user.split("PLACES\n")[1].split("\n" + "=" * 100)[0]):
+                for name in place["patterns"]:
+                    Model.asked.append(name)
+                    row = {"place": place["id"], "pattern": name, "answers": {}, "steps": {}}
+                    if name == "C1":
+                        row.update(answers={"against_expectation": True, "message_gives_cause": False, "ran_a_check": True, "check_can_answer": True,
+                                            "changed_before_check": False, "finding_from_check": True, "next_follows": True},
+                                   steps={"result_step": 2, "check_step": 3, "finding_step": 4})
+                    answer["results"].append(row)
         else:  # a reading: report one unexpected result at step 2
             answer = {"phases": [], "directions": [], "moments": [{"type": "unexpected", "step": 2, "steps": [2, 4], "what": "worse"}]}
         self.reply({"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(answer)}}], "usage": {}})

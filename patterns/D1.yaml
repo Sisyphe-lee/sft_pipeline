@@ -1,5 +1,5 @@
 # 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
-# submit/within/apart/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
+# places/skip/effort（在哪问、用哪个思考档位问）和 submit/within/apart/span（是否打标签、标哪几步）是程序规则，改了不用重标。
 name: D1
 title: On leaving a direction, gather new evidence first
 places:

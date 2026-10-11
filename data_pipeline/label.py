@@ -6,8 +6,9 @@
     label.py judge DIR [DIR ...] --url URL [URL ...]                        # DIR/labels/<pattern>-<sha>/<place>.json
     label.py labels DIR [DIR ...] --out labels.jsonl                        # the labels of the current pattern versions
 
-A pattern is one file, patterns/<name>.yaml. The model is asked about one place and one pattern at a time, and its
-answer is kept under the pattern's fingerprint: after an edit of one pattern file only that pattern is asked again.
+A pattern is one file, patterns/<name>.yaml. One request asks about neighbouring places and all the patterns looked
+for there; each answer is kept by place and pattern under the pattern's fingerprint, so after an edit of one pattern
+file only that pattern is asked again.
 """
 import argparse
 import hashlib
@@ -21,13 +22,15 @@ from pathlib import Path
 
 PATTERN_DIR = Path(__file__).resolve().parents[1] / "patterns"
 RULE_PLACES = ("start", "submit", "result", "end")  # found by rollout.py; every other place type comes from a reading
+REACH = 10  # places further apart than this many steps are not asked about in one request
 
 
 def load_patterns(directory=PATTERN_DIR):
     """(shared instructions, {name: pattern}). A pattern is one YAML file: the place types where it is looked for, its
     yes/no questions with the answer the behaviour needs, its steps in order, and which of the steps carry the label
     (`span`). `sha` is the fingerprint of what the model reads (the shared instructions and this pattern's questions,
-    steps and notes): editing those asks the model again, for this pattern only. `submit`, `within` and `apart` (a step lies
+    steps and notes): editing those asks the model again, for this pattern only. `places` and `skip` (where it is asked, see
+    asked_at), `effort` (the reasoning effort of its requests, when not the configured one) and `submit`, `within` and `apart` (a step lies
     at most, or at least, that many steps after the one before it) and `span` (`from`/`to`/`max`: the steps between two named steps, dropped
     when longer than `max`; or `steps`: just the named steps) are applied by the program when labels are collected, so
     changing them needs no new answers."""
@@ -233,13 +236,38 @@ def window(body, lo, hi, limit):
     return starts[a][0], starts[b][0], body[pos[a]:pos[b + 1]]
 
 
-def looked_for(patterns):
-    """{place type: [pattern names]} by the current pattern files."""
-    at = {}
-    for name, pattern in patterns.items():
-        for kind in pattern["places"]:
-            at.setdefault(kind, []).append(name)
-    return at
+def asked_at(pattern, place):
+    """Whether the pattern is looked for at the place: at the place types it names, unless the facts of the place rule
+    the behaviour out (`skip`: {fact: [values]}). A result where a reader noted a moment counts as a place of that
+    moment's type too: C1 names `unexpected`, so of the results it is asked only where a reader saw one."""
+    facts = place.get("facts") or {}
+    kinds = {place["type"]} | {note.get("type") for note in facts.get("reader_notes", [])}
+    if not kinds & set(pattern["places"]):
+        return False
+    return not any(fact in facts and facts[fact] in values for fact, values in (pattern.get("skip") or {}).items())
+
+
+def requests(out, places, patterns, wanted, most):
+    """The questions still open for one rollout, grouped into requests: [[(place, pattern), ...], ...]. The two places
+    of one submission (the command and its result) are always asked together, with all their patterns. Neighbours join
+    while a request holds at most `most` (place, pattern) pairs and its places lie within REACH steps. A pattern that
+    names its own reasoning `effort` is asked apart from the others, in requests of that effort."""
+    units = {}
+    for place in sorted(places, key=lambda p: p["step"]):
+        submission = place["facts"].get("round") if place["type"] in ("submit", "result") else None
+        for name, p in patterns.items():
+            if name in wanted and asked_at(p, place) and answer_of(out, place, p) is None:
+                units.setdefault((p.get("effort"), submission or place["id"]), []).append((place, p))
+    grouped = []
+    for effort in {key[0] for key in units}:
+        last = None
+        for unit in (u for key, u in units.items() if key[0] == effort):
+            if last and len(last) + len(unit) <= most and unit[-1][0]["step"] - last[0][0]["step"] <= REACH:
+                last.extend(unit)
+            else:
+                last = list(unit)
+                grouped.append(last)
+    return sorted(grouped, key=lambda pairs: pairs[0][0]["step"])
 
 
 def answer_of(out, place, pattern):
@@ -253,9 +281,10 @@ def answer_of(out, place, pattern):
 
 
 def judge(args):
-    """Ask the served model about every (place, pattern) of rendered rollouts that has no answer yet for the pattern's
-    current version. One request holds the shared instructions, the head, the other reader's account, the steps around
-    the place, one pattern and the place. Answers go to DIR/labels/<pattern>-<sha>/<place id>.json."""
+    """Ask the served model every (place, pattern) of rendered rollouts that has no answer yet for the pattern's current
+    version. One request holds the shared instructions, the head, the other reader's account, the steps around its
+    places, the patterns and the places. An answer goes to DIR/labels/<pattern>-<sha>/<place id>.json; what the model
+    wrote for the whole request (its reasoning, the time and the tokens) goes to DIR/requests/."""
     common, patterns = load_patterns()
     wanted = set(args.patterns or patterns)
     args.protocol = "patterns/common.md"
@@ -264,14 +293,11 @@ def judge(args):
     for u in urls:
         with urllib.request.urlopen(u + "/models", timeout=30) as resp:
             models[u] = json.load(resp)["data"][0]["id"]
-    jobs, at = [], looked_for(patterns)
+    jobs = []
     for d in args.dirs:
         out = Path(d)
-        for place in json.loads((out / "places.json").read_text()):
-            for name in at.get(place["type"], ()):
-                if name in wanted and answer_of(out, place, patterns[name]) is None:
-                    jobs.append((out, place, patterns[name]))
-    print(f"{len(jobs)} questions to ask on {len(urls)} URLs x {args.per_url}", flush=True)
+        jobs += [(out, pairs) for pairs in requests(out, json.loads((out / "places.json").read_text()), patterns, wanted, args.together)]
+    print(f"{sum(len(pairs) for _, pairs in jobs)} questions to ask in {len(jobs)} requests on {len(urls)} URLs x {args.per_url}", flush=True)
     lock, busy, shared = threading.Lock(), {}, {}
 
     def take(me, last):  # a worker stays on one rollout while it can: the server keeps the log it has just read
@@ -296,39 +322,67 @@ def judge(args):
                                    submits=[x["step"] for x in points["points"] if x["kind"] == "submit"])
             return shared[out]
 
-    def one(base, out, place, pattern):
+    def one(base, out, pairs):
         m = material(out)
-        near = [n for n in [place.get("step")] + list(place.get("steps") or []) if isinstance(n, int)]
-        lo, hi, text = window(m["body"], min(near), max(near), args.window_chars)
-        # the pattern and the place come last: the requests for one place share everything before them
-        user = ("=" * 100 + "\nHEAD\n" + m["head"] + "\n" + "=" * 100 + "\nTIMELINE\n" + m["timeline"] + "\n" + "=" * 100
-                + f"\nLOG (steps #{lo} to #{hi} of #{m['first']} to #{m['last']})\n" + text + "\n" + "=" * 100 + "\nPATTERN\n" + pattern_text(pattern) + "\n"
-                + "=" * 100 + "\nPLACE\n" + json.dumps({k: v for k, v in place.items() if k != "patterns"}, ensure_ascii=False, indent=1) + "\n" + "=" * 100
-                + "\nWrite your answer now: one JSON object on one line.")
         limit = args.max_tokens
         for attempt in range(1, args.tries + 1):
+            at = {}  # place id -> (place, the patterns asked there)
+            for place, pattern in pairs:
+                at.setdefault(place["id"], (place, []))[1].append(pattern)
+            near = [n for place, _ in at.values() for n in [place.get("step")] + list(place.get("steps") or []) if isinstance(n, int)]
+            lo, hi, text = window(m["body"], min(near), max(near), args.window_chars)
+            asked = sorted({pattern["name"]: pattern for _, pattern in pairs}.values(), key=lambda p: p["name"])
+            shown = [dict({k: v for k, v in place.items() if k != "patterns"}, patterns=[p["name"] for p in ps]) for place, ps in at.values()]
+            # the patterns and the places come last: requests for neighbouring places share everything before them
+            user = ("=" * 100 + "\nHEAD\n" + m["head"] + "\n" + "=" * 100 + "\nTIMELINE\n" + m["timeline"] + "\n" + "=" * 100
+                    + f"\nLOG (steps #{lo} to #{hi} of #{m['first']} to #{m['last']})\n" + text + "\n" + "=" * 100
+                    + "\nPATTERNS\n" + "\n\n".join(pattern_text(p) for p in asked) + "\n" + "=" * 100
+                    + "\nPLACES\n" + json.dumps(shown, ensure_ascii=False, indent=1) + "\n" + "=" * 100
+                    + f"\nWrite your answer now: one JSON object on one line, with {len(pairs)} entries in `results`.")
             began = time.time()
+            extra = dict(json.loads(args.extra), **({"reasoning_effort": asked[0]["effort"]} if asked[0].get("effort") else {}))
             try:
-                meta, msg = ask(base, models[base], common, user, argparse.Namespace(**dict(vars(args), max_tokens=limit)))
+                meta, msg = ask(base, models[base], common, user, argparse.Namespace(**dict(vars(args), max_tokens=limit, extra=json.dumps(extra))))
                 if meta["finish"] == "length":
+                    if len(at) > 1:  # too much to think about at once: ask about the places in two halves
+                        ids = list(at)[:len(at) // 2]
+                        print(f"{out.name} {'+'.join(at)}: cut at max_tokens after {meta['seconds']}s; asking in two parts", flush=True)
+                        one(base, out, [x for x in pairs if x[0]["id"] in ids])
+                        one(base, out, [x for x in pairs if x[0]["id"] not in ids])
+                        return
                     limit = limit * 3 // 2
                     raise ValueError(f"answer cut at max_tokens; next attempt gets {limit}")
-                row = parse_json(msg.get("content") or "")
-                gaps = decide(pattern, row, m["kinds"], m["submits"])[1]  # for the log only; labels() decides again from the stored answer
-                record = dict(place=place["id"], at=[place["type"], place["step"]], pattern=pattern["name"], sha=pattern["sha"],
-                              answers=row.get("answers"), steps=row.get("steps"), why=row.get("why"), quote=row.get("quote"),
-                              **{k: row[k] for k in ("source", "file") if k in row},
-                              meta=dict(model=meta["model"], url=base, seconds=meta["seconds"], usage=meta["usage"], attempt=attempt, steps_shown=[lo, hi]),
-                              reasoning=msg.get("reasoning_content"))
-                target = out / "labels" / f"{pattern['name']}-{pattern['sha']}" / f"{place['id']}.json"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.with_suffix(".tmp").write_text(json.dumps(record, ensure_ascii=False, indent=1))
-                target.with_suffix(".tmp").replace(target)
-                print(f"done {out.name} {place['id']} {pattern['name']}: {'label' if not gaps else 'no'}, {meta['seconds']}s", flush=True)
-                return
+                rows = parse_json(msg.get("content") or "").get("results")
+                rows = {(str(row.get("place")), str(row.get("pattern"))): row for row in rows if isinstance(row, dict) and isinstance(row.get("answers"), dict)}
+                name = f"{time.strftime('%m%d-%H%M%S')}-{pairs[0][0]['id']}-{pairs[0][1]['name']}-{len(pairs)}.json"
+                (out / "requests").mkdir(exist_ok=True)
+                (out / "requests" / name).write_text(json.dumps(dict(
+                    asked=[[place["id"], pattern["name"]] for place, pattern in pairs], answered=len(rows), meta=dict(meta, attempt=attempt, steps_shown=[lo, hi]),
+                    content=msg.get("content"), reasoning=msg.get("reasoning_content")), ensure_ascii=False, indent=1))
+                found = 0
+                for place, pattern in list(pairs):
+                    row = rows.get((place["id"], pattern["name"]))
+                    if row is None:
+                        continue
+                    found += not decide(pattern, row, m["kinds"], m["submits"])[1]  # for the log only; labels() decides again from the stored answer
+                    record = dict(place=place["id"], at=[place["type"], place["step"]], pattern=pattern["name"], sha=pattern["sha"],
+                                  answers=row.get("answers"), steps=row.get("steps"), why=row.get("why"), quote=row.get("quote"),
+                                  **{k: row[k] for k in ("source", "file") if k in row},
+                                  meta=dict(model=meta["model"], url=base, request=name, asked_together=len(pairs), steps_shown=[lo, hi]))
+                    target = out / "labels" / f"{pattern['name']}-{pattern['sha']}" / f"{place['id']}.json"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.with_suffix(".tmp").write_text(json.dumps(record, ensure_ascii=False, indent=1))
+                    target.with_suffix(".tmp").replace(target)
+                    pairs.remove((place, pattern))
+                usage = meta["usage"] or {}
+                print(f"done {out.name} {'+'.join(at)}: {len(rows)} answers, {found} labels, {meta['seconds']}s, "
+                      f"{usage.get('prompt_tokens')}+{usage.get('completion_tokens')} tokens", flush=True)
+                if not pairs:
+                    return
+                raise ValueError(f"{len(pairs)} of the questions were not answered")  # asked again, alone
             except Exception as error:  # noqa: BLE001 - log and retry whatever the server or the parser raised
-                print(f"{out.name} {place['id']} {pattern['name']}: attempt {attempt} failed after {round(time.time() - began)}s: {type(error).__name__} {error}", flush=True)
-                time.sleep(20)
+                print(f"{out.name} {'+'.join(at)}: attempt {attempt} failed after {round(time.time() - began)}s: {type(error).__name__} {error}", flush=True)
+                time.sleep(20 if "not answered" not in str(error) else 0)
 
     def worker(me, base):
         last = None
@@ -348,10 +402,8 @@ def judge(args):
 
 def places(args):
     out = Path(args.dir)
-    at = {}  # place type -> the patterns looked for there
-    for name, pattern in load_patterns()[1].items():
-        for kind in pattern["places"]:
-            at.setdefault(kind, []).append(name)
+    patterns = load_patterns()[1]
+    at = {kind for pattern in patterns.values() for kind in pattern["places"]} | {"submit", "result"}  # the place types to keep
     rule = json.loads((out / "points.json").read_text())
     timeline = dict(moments=[])
     for name in args.timeline:  # several reader passes: a moment of the same type within two steps of one from an earlier pass is the same moment
@@ -373,7 +425,7 @@ def places(args):
         if p["kind"] not in at:
             continue
         facts = {k: p[k] for k in ("round", "score", "best_before", "mark", "first_submit_min", "note", "matched_by", "located_by") if k in p}
-        rows.append(dict(src="rule", type=p["kind"], step=p["step"], steps=p["steps"], patterns=at[p["kind"]], facts=facts))
+        rows.append(dict(src="rule", type=p["kind"], step=p["step"], steps=p["steps"], facts=facts))
     restores = sorted(int(m["step"]) for m in timeline.get("moments", []) if m.get("type") == "restore" and str(m.get("step", "")).isdigit())
     for row in rows:  # where the reader saw the files put back: a fact for B1, which is judged at results and at the end
         later = [n for n in restores if n > row["step"]]
@@ -398,7 +450,7 @@ def places(args):
         if same:
             same["facts"].setdefault("reader_notes", []).append(dict(facts, type=m["type"], step=step))
             continue
-        rows.append(dict(src="reader", type=m["type"], step=step, steps=[min(lo, step), max(hi, step)], patterns=at[m["type"]], facts=facts))
+        rows.append(dict(src="reader", type=m["type"], step=step, steps=[min(lo, step), max(hi, step)], facts=facts))
     rows.sort(key=lambda x: (x["step"], x["src"] != "rule"))
     taken = set()
     for row in rows:  # the id says what the place is, so it stays the same when other places come or go
@@ -410,7 +462,7 @@ def places(args):
     kinds = {}
     for row in rows:
         kinds[f"{row['src']}:{row['type']}"] = kinds.get(f"{row['src']}:{row['type']}", 0) + 1
-    print(f"{out.name}: {len(rows)} places, {sum(len(r['patterns']) for r in rows)} questions {kinds}")
+    print(f"{out.name}: {len(rows)} places, {sum(asked_at(p, r) for r in rows for p in patterns.values())} questions {kinds}")
 
 
 def labels(args):
@@ -424,9 +476,9 @@ def labels(args):
             body = (out / "transcript.txt").read_text().partition("\n" + "=" * 100 + "\n")[2]
             kinds = {int(n): kind for n, kind in re.findall(r"^#(\d+) \S+ ([A-Z]+)", body, re.M)}
             submits = [x["step"] for x in points["points"] if x["kind"] == "submit"]
-            seen, at = set(), looked_for(patterns)
+            seen = set()
             for place in json.loads((out / "places.json").read_text()):
-                for name in at.get(place["type"], ()):
+                for name in (n for n, p in patterns.items() if asked_at(p, place)):
                     row = answer_of(out, place, patterns[name])
                     if row is None:
                         missing += 1
@@ -470,6 +522,7 @@ def main():
     p.add_argument("--url", nargs="+", required=True, help="OpenAI-compatible base URLs ending in /v1")
     p.add_argument("--per-url", type=int, default=1, help="concurrent requests per URL")
     p.add_argument("--patterns", nargs="*", help="ask only about these patterns (default: all)")
+    p.add_argument("--together", type=int, default=8, help="at most this many (place, pattern) pairs in one request; one submission is never split")
     p.add_argument("--timeline", default="timeline.json")
     p.add_argument("--window-chars", type=int, default=150000, help="the log is shown as the steps around the place, about this size")
     p.add_argument("--max-tokens", type=int, default=30000)

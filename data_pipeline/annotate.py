@@ -26,8 +26,9 @@ import measure_rows  # noqa: E402
 import rollout  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULTS = dict(patterns=[], readings=["timeline", "ideas", "surprises"], per_url=2, window_chars=150000,
-                read_max_tokens=60000, judge_max_tokens=30000, render_cap=3000)
+SEGMENT_CHARS = 1200000  # a longer log is read in parts of about this size
+DEFAULTS = dict(patterns=[], readings=["timeline", "ideas", "surprises"], per_url=2, together=8, window_chars=150000,
+                read_max_tokens=60000, judge_max_tokens=30000, read_request={}, judge_request={}, render_cap=3000)
 
 
 def load_config(path):
@@ -81,29 +82,28 @@ def main():
         measure_rows.run(args.student, rows_dir)
     # 3. readings and 4. places: the labelling model reports where to look
     urls = kimi_urls()
-    todo, lock = list(dirs), threading.Lock()
-
-    failed = []
+    first, later = lab["readings"][0], lab["readings"][1:]
+    todo, held, lock, failed = [], {}, threading.Lock(), []
+    for d in dirs:  # the passes of one log run side by side; a log read in parts needs the first pass's account for the others
+        todo.append((d, first))
+        (held.setdefault(d, []) if (d / "transcript.txt").stat().st_size > SEGMENT_CHARS else todo).extend((d, name) for name in later)
+    parted = set(held)
 
     def reader(url):
         while True:
             with lock:
                 if not todo or failed:
                     return
-                d = todo.pop(0)
+                d, name = todo.pop(0)
             try:
-                read_one(url, d)
+                label.read(argparse.Namespace(dir=str(d), protocol=str(REPO / f"patterns/{name}-protocol.md"), url=url, name=name,
+                                              max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra=json.dumps(lab["read_request"]),
+                                              force=False, segment_chars=SEGMENT_CHARS, context=f"{first}.json" if name != first and d in parted else None))
             except BaseException as error:  # noqa: BLE001 - a thread must not die silently; report and stop the run
-                failed.append(f"{d.name}: {type(error).__name__} {error}")
-
-    def read_one(url, d):
-        for k, name in enumerate(lab["readings"]):
-            label.read(argparse.Namespace(dir=str(d), protocol=str(REPO / f"patterns/{name}-protocol.md"), url=url, name=name,
-                                          max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}", force=False,
-                                          segment_chars=1200000, context=f"{lab['readings'][0]}.json" if k else None))
-        if not (d / "places.json").exists():
-            label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in lab["readings"][1:] + lab["readings"][:1]]))
-
+                failed.append(f"{d.name} {name}: {type(error).__name__} {error}")
+            with lock:
+                if name == first:
+                    todo.extend(held.pop(d, []))
 
     threads = [threading.Thread(target=reader, args=(u,)) for u in urls for _ in range(lab["per_url"])]
     for t in threads:
@@ -112,10 +112,13 @@ def main():
         t.join()
     if failed:
         sys.exit("reading failed: " + "; ".join(failed))
-    # 5. label: one question per place and pattern; only what the current pattern files have not been asked yet
-    label.judge(argparse.Namespace(dirs=[str(d) for d in dirs], url=urls, per_url=lab["per_url"], patterns=lab["patterns"],
+    for d in dirs:
+        if not (d / "places.json").exists():
+            label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in later + [first]]))
+    # 5. label: neighbouring places and their patterns in one request; only what the current pattern files have not been asked yet
+    label.judge(argparse.Namespace(dirs=[str(d) for d in dirs], url=urls, per_url=lab["per_url"], patterns=lab["patterns"], together=lab["together"],
                                    timeline=f"{lab['readings'][0]}.json", window_chars=lab["window_chars"],
-                                   max_tokens=lab["judge_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}"))
+                                   max_tokens=lab["judge_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra=json.dumps(lab["judge_request"])))
     # 6. the labels of the current pattern versions; the file before this run is kept beside it
     labels = args.data / "labels.jsonl"
     if labels.exists():
