@@ -1,3 +1,5 @@
+# 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
+# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: D4
 title: Leave a direction that failed twice
 places:
@@ -22,3 +24,7 @@ steps:
   then: <=
 - id: leave_step
   text: the first step of the other work
+span:
+  from: leave_step
+  to: leave_step
+  max: 1

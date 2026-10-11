@@ -25,15 +25,17 @@ RULE_PLACES = ("start", "submit", "result", "end")  # found by rollout.py; every
 
 def load_patterns(directory=PATTERN_DIR):
     """(shared instructions, {name: pattern}). A pattern is one YAML file: the place types where it is looked for, its
-    yes/no questions with the answer the behaviour needs, and its steps in order. `sha` is the fingerprint of everything
-    that decides its labels, so editing one pattern file invalidates the labels of that pattern only."""
+    yes/no questions with the answer the behaviour needs, its steps in order, and which of the steps carry the label
+    (`span`). `sha` is the fingerprint of what the model reads (the shared instructions and this pattern's questions,
+    steps and notes): editing those asks the model again, for this pattern only. `run`, `submit` and `span` are applied
+    by the program when labels are collected, so changing them needs no new answers."""
     import yaml
     common = (directory / "common.md").read_text()
     patterns = {}
     for path in sorted(directory.glob("*.yaml")):
         text = path.read_text()
         pattern = yaml.safe_load(text)
-        pattern["sha"] = hashlib.sha256((common + "\n" + text).encode()).hexdigest()[:8]
+        pattern["sha"] = hashlib.sha256((common + "\n" + pattern_text(pattern)).encode()).hexdigest()[:8]
         patterns[pattern["name"]] = pattern
     return common, patterns
 
@@ -50,8 +52,8 @@ def pattern_text(pattern):
     return "\n".join(lines + [f"- {note}" for note in pattern.get("notes", [])])
 
 
-def label_gaps(pattern, row, kinds, submits):
-    """Why the model's answers and steps do not make a label: a list, empty when they do."""
+def decide(pattern, row, kinds, submits):
+    """(labelled steps, gaps). The steps carry the label when the model's answers and steps hold; else gaps says why not."""
     answers = row.get("answers") if isinstance(row.get("answers"), dict) else {}
     steps = row.get("steps") if isinstance(row.get("steps"), dict) else {}
     gaps = [f"{q['id']} is not {str(q['expect']).lower()}" for q in pattern["questions"] if answers.get(q["id"]) is not q["expect"]]
@@ -60,25 +62,20 @@ def label_gaps(pattern, row, kinds, submits):
         n = steps.get(step["id"])
         if isinstance(n, int) and not isinstance(n, bool) and n in kinds:
             given[step["id"]] = n
+            if step.get("run") and kinds[n] != "RUN":
+                gaps.append(f"{step['id']} is not a RUN step")
+            if step.get("submit") and not any(abs(n - x) <= 2 for x in submits):
+                gaps.append(f"{step['id']} is not a submit command")
         else:
             gaps.append(f"{step['id']} missing")
     for a, b in zip(pattern["steps"], pattern["steps"][1:]):
         if a["id"] in given and b["id"] in given and not (given[a["id"]] < given[b["id"]] if a["then"] == "<" else given[a["id"]] <= given[b["id"]]):
             gaps.append(f"{a['id']} not {a['then']} {b['id']}")
-    whole = isinstance(row.get("start"), int) and isinstance(row.get("end"), int)
-    if not whole:
-        gaps.append("no span")
-    for step in pattern["steps"]:
-        n = given.get(step["id"])
-        if n is None:
-            continue
-        if step.get("run") and kinds[n] != "RUN":
-            gaps.append(f"{step['id']} is not a RUN step")
-        if step.get("submit") and not any(abs(n - x) <= 2 for x in submits):
-            gaps.append(f"{step['id']} is not a submit command")
-        if step.get("inside") and whole and not row["start"] <= n <= row["end"]:
-            gaps.append(f"{step['id']} outside the span")
-    return gaps
+    span = pattern["span"]
+    lo, hi = given.get(span["from"]), given.get(span["to"])
+    if lo is not None and hi is not None and hi - lo + 1 > span["max"]:
+        gaps.append(f"more than {span['max']} steps from {span['from']} to {span['to']}")  # too long to be this behaviour and little else
+    return ([] if gaps or lo is None or hi is None else list(range(lo, hi + 1))), gaps
 
 
 def parse_json(text):
@@ -288,9 +285,9 @@ def judge(args):
                     limit = limit * 3 // 2
                     raise ValueError(f"answer cut at max_tokens; next attempt gets {limit}")
                 row = parse_json(msg.get("content") or "")
-                gaps = label_gaps(pattern, row, m["kinds"], m["submits"])
-                record = dict(place=place["id"], pattern=pattern["name"], sha=pattern["sha"], label=not gaps, start=row.get("start"), end=row.get("end"),
-                              answers=row.get("answers"), steps=row.get("steps"), gaps=gaps, why=row.get("why"), quote=row.get("quote"),
+                gaps = decide(pattern, row, m["kinds"], m["submits"])[1]  # for the log only; labels() decides again from the stored answer
+                record = dict(place=place["id"], pattern=pattern["name"], sha=pattern["sha"],
+                              answers=row.get("answers"), steps=row.get("steps"), why=row.get("why"), quote=row.get("quote"),
                               **{k: row[k] for k in ("source", "file") if k in row},
                               meta=dict(model=meta["model"], url=base, seconds=meta["seconds"], usage=meta["usage"], attempt=attempt, steps_shown=[lo, hi]),
                               reasoning=msg.get("reasoning_content"))
@@ -384,13 +381,16 @@ def places(args):
 
 
 def labels(args):
-    """Collect the labels of rendered rollouts, for the current version of every pattern, into one JSONL file."""
+    """Decide the labels from the stored answers, by the current pattern files, and write them to one JSONL file."""
     _, patterns = load_patterns()
     count, per, missing = 0, {}, 0
     with open(args.out, "w", encoding="utf-8") as stream:
         for d in args.dirs:
             out = Path(d)
             points = json.loads((out / "points.json").read_text())
+            body = (out / "transcript.txt").read_text().partition("\n" + "=" * 100 + "\n")[2]
+            kinds = {int(n): kind for n, kind in re.findall(r"^#(\d+) \S+ ([A-Z]+)", body, re.M)}
+            submits = [x["step"] for x in points["points"] if x["kind"] == "submit"]
             seen = set()
             for place in json.loads((out / "places.json").read_text()):
                 for name in place["patterns"]:
@@ -401,15 +401,14 @@ def labels(args):
                         missing += 1
                         continue
                     row = json.loads(path.read_text())
-                    key = (name, row.get("start"), row.get("end"))
-                    if not row["label"] or key in seen:  # the same span is often reached from two places
+                    steps, _ = decide(patterns[name], row, kinds, submits)
+                    if not steps or (name, steps[0], steps[-1]) in seen:  # the same steps are often reached from two places
                         continue
-                    seen.add(key)
+                    seen.add((name, steps[0], steps[-1]))
                     stream.write(json.dumps(dict(
-                        task=points["task"], trajectory_id=points["trajectory_id"], pattern=name, pattern_sha=row["sha"], start=row["start"], end=row["end"],
-                        steps=list(range(row["start"], row["end"] + 1)), place=dict(id=place["id"], type=place["type"], step=place["step"]),
-                        answers=row["answers"], evidence=row["steps"], why=row.get("why"), quote=row.get("quote"), model=row["meta"]["model"]),
-                        ensure_ascii=False) + "\n")
+                        task=points["task"], trajectory_id=points["trajectory_id"], pattern=name, pattern_sha=row["sha"], steps=steps,
+                        place=dict(id=place["id"], type=place["type"], step=place["step"]), answers=row["answers"], evidence=row["steps"],
+                        why=row.get("why"), quote=row.get("quote"), model=row["meta"]["model"]), ensure_ascii=False) + "\n")
                     count += 1
                     per[name] = per.get(name, 0) + 1
     print(f"{count} labels in {len(args.dirs)} rollouts: {dict(sorted(per.items()))}" + (f"; {missing} questions not answered yet" if missing else ""))

@@ -1,3 +1,5 @@
+# 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
+# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: A3
 title: Ask the judge with a probe submission
 places:
@@ -25,7 +27,10 @@ steps:
 - id: submit_step
   run: true
   submit: true
-  inside: true
   then: <=
   text: a submit command
 - id: answer_step
+span:
+  from: question_step
+  to: answer_step
+  max: 8

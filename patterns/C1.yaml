@@ -1,3 +1,5 @@
+# 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
+# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: C1
 title: Check the reason of an unexpected result before changing anything
 places:
@@ -27,9 +29,11 @@ steps:
   then: <
 - id: check_step
   run: true
-  inside: true
   then: <=
 - id: finding_step
-  inside: true
+span:
+  from: check_step
+  to: finding_step
+  max: 8
 notes:
 - 'Also `"source"`: `"judge"` when the unexpected result is a judge answer, `"local"` otherwise.'

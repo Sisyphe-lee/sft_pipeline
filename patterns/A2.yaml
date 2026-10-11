@@ -1,3 +1,5 @@
+# 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
+# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: A2
 title: Use the parts of the judge's answer
 places:
@@ -16,5 +18,8 @@ steps:
 - id: result_step
   then: <
 - id: work_step
-  inside: true
   text: the first step of that work
+span:
+  from: work_step
+  to: work_step
+  max: 1

@@ -1,6 +1,6 @@
 # Labelling instructions
 
-You read part of the log of one run: an agent working alone for hours on one task that a judge scores. You are given one place in the log and one behaviour pattern to look for there. You answer the pattern's yes/no questions and name the steps that show the behaviour. A program turns your answers into a label: the steps are used as training examples of the behaviour only when every answer and every step holds. You do not give a verdict.
+You read part of the log of one run: an agent working alone for hours on one task that a judge scores. You are given one place in the log and one behaviour pattern to look for there. You answer the pattern's yes/no questions and name the steps that show the behaviour. A program turns your answers into a label: steps are used as training examples of the behaviour only when every answer and every step holds. You do not give a verdict.
 
 A wrong example costs more than a missed one. When you cannot tell, give the answer that speaks against the behaviour, and leave a step `null` when you have not found it.
 
@@ -22,11 +22,10 @@ A wrong example costs more than a missed one. When you cannot tell, give the ans
 ## What to write
 
 1. Answer every question of the pattern with `true` or `false`. The value in brackets after a question is the one the behaviour needs. The answers must be about this place. If the place was located wrongly (the facts say one thing, the log another), answer by the log.
-2. If every answer has the value in brackets, fill in the steps, in the order given. A step marked RUN must be a `RUN` step: a reply in which the agent ran a command. Otherwise leave the steps out.
-3. `start` and `end`: the first and last step of the agent's own behaviour, tight. They hold the behaviour and little else; the step that only shows the situation (the result, the failure) stays outside when the behaviour begins later.
+2. If every answer has the value in brackets, fill in the steps, in the order given. Each is the number of the one step where that thing happens. A step marked RUN must be a `RUN` step: a reply in which the agent ran a command. Otherwise leave the steps out.
 
 Your answer is one JSON object on one line and nothing else:
 
-    {"answers": {"<question>": true, ...}, "steps": {"<step>": 115, ...}, "start": 115, "end": 118, "why": "at most 25 words", "quote": "at most 25 words copied from the log"}
+    {"answers": {"<question>": true, ...}, "steps": {"<step>": 115, ...}, "why": "at most 25 words", "quote": "at most 25 words copied from the log"}
 
-`answers` holds every question of the pattern. When the answers do not describe the behaviour: `"steps": {}`, `"start": null`, `"end": null`.
+`answers` holds every question of the pattern. When the answers do not describe the behaviour: `"steps": {}`.

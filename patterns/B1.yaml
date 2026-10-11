@@ -1,3 +1,5 @@
+# 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
+# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: B1
 title: Back to the best version
 places:
@@ -16,5 +18,8 @@ questions:
 steps:
 - id: restore_step
   run: true
-  inside: true
   text: the command that puts it back
+span:
+  from: restore_step
+  to: restore_step
+  max: 1

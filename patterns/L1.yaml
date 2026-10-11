@@ -1,3 +1,5 @@
+# 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
+# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: L1
 title: A local number before submitting
 places:
@@ -18,10 +20,12 @@ questions:
 steps:
 - id: measure_step
   run: true
-  inside: true
   then: <
   text: prints the number
 - id: submit_step
   run: true
   submit: true
-  inside: true
+span:
+  from: measure_step
+  to: submit_step
+  max: 6

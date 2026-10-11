@@ -45,18 +45,23 @@ Kimi 地址从环境变量 `KIMI_URLS`（空格分隔，以 `/v1` 结尾）读�
 |---|---|
 | `places` | 在哪类位置上找这个 pattern（`start`、`submit`、`result`、`end` 由规则定位，其余由 Kimi 通读报出） |
 | `questions` | 是非题，`expect` 是“算这个 pattern”所需的答案 |
-| `steps` | 要 Kimi 指出的关键步，按先后顺序；`run` 表示这一步必须执行了命令，`submit` 表示必须是提交，`inside` 表示必须落在标出的范围内 |
+| `steps` | 要 Kimi 指出的关键步，按先后顺序；`run` 表示这一步必须执行了命令，`submit` 表示必须是提交 |
+| `span` | 标签落在哪些步上：从关键步 `from` 到 `to`；超过 `max` 步就不打标签 |
 | `notes` | 给 Kimi 的补充说明 |
 
-所有答案都符合 `expect`、关键步齐全且顺序正确，才打标签；这由程序判断，不由 Kimi 判断。
-改 pattern 就是改这个文件；新增 pattern 就是加一个文件。`patterns/common.md` 是所有 pattern 共用的说明，改它会让全部重标。
+所有答案都符合 `expect`、关键步齐全且顺序正确、范围不超过 `max`，才打标签；这由程序判断，不由 Kimi 判断。
+
+改 pattern 就是改这个文件，新增 pattern 就是加一个文件：
+- 改 Kimi 读到的内容（`title`、`questions`、`steps` 的名字、文字、顺序和 `run`、`notes`）：只重标这一个 pattern。
+- 改程序规则（`span`、`submit`、`places`）：已有回答不重问，重跑时按新规则重新算标签。
+- 改 `patterns/common.md`（所有 pattern 共用的说明）：全部重标，尽量不动。
 
 ## 选数据
 
     python3 data_pipeline/select_rows.py \
         --policy configs/data_policies/pattern_all.yaml \
         --rows <数据目录>/rows \
-        --labels <数据目录>/labels-<指纹>.jsonl [更多标签文件 ...] \
+        --labels <数据目录>/labels.jsonl [更多标签文件 ...] \
         --output <清单>.json
 
 | 策略文件 | 含义 |
@@ -87,8 +92,8 @@ Kimi 地址从环境变量 `KIMI_URLS`（空格分隔，以 `/v1` 结尾）读�
 
 ## 现状（2026-10-11）
 
-- 导出、渲染和选数据在一条 Kimi rollout 上跑通（212 行）。Kimi 标注部分是从 EdgeBench 移植的
-  （在那边用 7 条 rollout 对照 Opus 测过），在本仓库的入口下还在调试。
+- 标注和选数据在一条 Kimi rollout 上整条跑通（212 步，159 个问题约 12 分钟，56 个标签覆盖 101 步）；
+  改程序规则不重问、改一个 pattern 的题目只重问这一个，都实测过。还没在多条、带上下文压缩的 rollout 上跑。
 - 训练：`training/`、`jobs/`、`configs/recipes`、`configs/training` 是从 physicalagent-sft-pipeline
   （分支 `feat/flashnext-sft`，提交 `dc7854c`）原样复制的，还没去掉图像和机器人相关的部分，目前不能运行。
 - 2026 年 9 月的 Kimi rollout 只能用来调流程，不能用来训练：那批数据里模型几乎不思考（见 EdgeBench `docs/kimi-serving.md`）。

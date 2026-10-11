@@ -77,24 +77,35 @@ def main():
     urls = kimi_urls()
     todo, lock = list(dirs), threading.Lock()
 
+    failed = []
+
     def reader(url):
         while True:
             with lock:
-                if not todo:
+                if not todo or failed:
                     return
                 d = todo.pop(0)
-            for k, name in enumerate(lab["readings"]):
-                label.read(argparse.Namespace(dir=str(d), protocol=str(REPO / f"patterns/{name}-protocol.md"), url=url, name=name,
-                                              max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}", force=False,
-                                              segment_chars=1200000, context=f"{lab['readings'][0]}.json" if k else None))
-            if not (d / "places.json").exists():
-                label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in lab["readings"][1:] + lab["readings"][:1]]))
+            try:
+                read_one(url, d)
+            except BaseException as error:  # noqa: BLE001 - a thread must not die silently; report and stop the run
+                failed.append(f"{d.name}: {type(error).__name__} {error}")
+
+    def read_one(url, d):
+        for k, name in enumerate(lab["readings"]):
+            label.read(argparse.Namespace(dir=str(d), protocol=str(REPO / f"patterns/{name}-protocol.md"), url=url, name=name,
+                                          max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}", force=False,
+                                          segment_chars=1200000, context=f"{lab['readings'][0]}.json" if k else None))
+        if not (d / "places.json").exists():
+            label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in lab["readings"][1:] + lab["readings"][:1]]))
+
 
     threads = [threading.Thread(target=reader, args=(u,)) for u in urls for _ in range(lab["per_url"])]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    if failed:
+        sys.exit("reading failed: " + "; ".join(failed))
     # 5. label: one question per place and pattern; only what the current pattern files have not been asked yet
     label.judge(argparse.Namespace(dirs=[str(d) for d in dirs], url=urls, per_url=lab["per_url"], patterns=lab["patterns"],
                                    timeline=f"{lab['readings'][0]}.json", window_chars=lab["window_chars"],

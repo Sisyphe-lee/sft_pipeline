@@ -1,3 +1,5 @@
+# 一个 pattern 一个文件。questions/steps/notes 是给 Kimi 看的，改了会重标这个 pattern；
+# run/submit/span 是程序用来决定是否打标签、标哪几步的，改了不用重标，重新汇总即可。
 name: D2
 title: Reopen an idea that was set aside
 places:
@@ -24,6 +26,12 @@ steps:
   then: <
 - id: stall_step
   then: <=
+- id: reopen_step
+  text: where it takes the idea up again
+  then: <=
 - id: test_step
   run: true
-  inside: true
+span:
+  from: reopen_step
+  to: test_step
+  max: 6
