@@ -1,0 +1,8 @@
+# 实验组：12 个 pattern 里任何一个标到的步都算 loss。
+arm: labelled            # labelled：标到的步；random_matched：每条 rollout 随机抽同样多的步；all：全部步
+patterns: []             # 只用其中几个 pattern 时写名字，如 [C1, D3]；空 = 全部
+seed: 0                  # random_matched 的抽样种子
+labelling:
+  sheet: patterns/label-sheet.md              # 改了这份说明就会重新标注（按内容指纹区分）
+  readings: [timeline, ideas, surprises]      # Kimi 通读几遍、各用哪份 patterns/<name>-protocol.md；第一遍的结果给后面几遍参考
+  per_url: 2                                  # 每个 Kimi 地址的并发请求数

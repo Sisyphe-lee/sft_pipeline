@@ -1,151 +1,80 @@
 # sft-pipeline
 
-SFT data and training for the "Learn from Experience" project. Rollouts of a source model (Kimi-K3 under Codex) on
-EdgeBench tasks are turned into training rows; a labelling model marks the steps that show a behaviour pattern; the
-student is trained with loss on those steps only. The control is the same number of random steps from the same rollouts.
+“Learn from Experience” 项目的数据清洗和训练。输入是 EdgeBench 上源模型（Kimi-K3 + Codex）rollout 的抓包，
+输出是训练清单：哪些步算 loss。rollout 的采集、桥接抓包和 checkpoint 的评测在 EdgeBench 仓库。
 
-Rollouts, the Responses bridge that captures the model exchanges, and the evaluation of a checkpoint are in the
-EdgeBench repository. This repository starts from the captured exchanges.
+## 两步
 
-## Layout
+| | 做什么 | 入口 |
+|---|---|---|
+| 清洗 | 抓包 → 训练行 → 标注 → 训练清单 | `data_pipeline/clean.py` |
+| 训练 | 按清单和 recipe 训练 | `training/train_sft.py`（见“现状”） |
 
-| Path | What |
+## 清洗
+
+一条命令做完，做什么由 policy 文件决定：
+
+    python3 data_pipeline/clean.py \
+        --policy configs/data_policies/pattern_all.yaml \
+        --capture <抓包目录> [<抓包目录> ...] \
+        --runs <harness 的 runs 目录> \
+        --tasks <EdgeBench 任务定义目录> \
+        --data <工作目录> \
+        --output <清单>.json
+
+| 参数 | 含义 |
 |---|---|
-| `data_pipeline/export_capture.py` | stage 1: captured exchanges → one row per model reply |
-| `data_pipeline/rollout.py` | stage 2: rows → numbered transcript and rule-located places |
-| `data_pipeline/label.py` | stages 3–6: readings, places, labels (`read`, `places`, `judge`, `labels`) |
-| `data_pipeline/select_rows.py` | stage 7: labels → training manifests (pattern arm, control arm) |
-| `data_pipeline/manifest.py` | manifest format shared with the trainer |
-| `scripts/label_rollouts.sh` | runs stages 3–6 for every rendered rollout in a directory |
-| `patterns/label-sheet.md` | the 12 patterns as yes/no questions and steps: what the labelling model is asked |
-| `patterns/{timeline,ideas,surprises}-protocol.md` | instructions for the three readings |
-| `training/`, `jobs/`, `configs/` | trainer, job templates and recipes (copied from physicalagent-sft-pipeline, see State) |
+| `--policy` | 清洗策略，`configs/data_policies/*.yaml` |
+| `--capture` | 桥接的抓包目录（里面是 `resp_<id>/`），每个桥接一个，可以给多个 |
+| `--runs` | harness 的运行目录，结构为 `<runs>/<rollout 编号>/<任务名>/`，用来取评分记录 |
+| `--tasks` | 任务定义（`<任务名>.json`），用来判断分数越高越好还是越低越好；不给则按越高越好 |
+| `--data` | 工作目录，中间结果都放这里，可重复使用 |
+| `--output` | 输出的训练清单 |
+| `--only` | 只处理编号里含这段文字的 rollout（任务名或运行编号），调试用 |
 
-## Directories used by a run
+Kimi 地址从环境变量 `KIMI_URLS`（空格分隔，以 `/v1` 结尾）读取，没有则读 `/personal/kimi.env`。
+集群上放在 tmux 里跑。中断后重跑同一条命令，已完成的部分会跳过。
 
-Nothing here is committed. Three directories, anywhere on disk:
+### 策略文件
 
-- `ROWS/`: `<trajectory id>.jsonl`, written by stage 1. This is the training data; it is never edited afterwards.
-- `WORK/<trajectory id>/`: everything the labelling of one rollout needs and produces (stages 2–5).
-- `MANIFESTS/`: the selection manifests (stage 7), which point into `ROWS/` by relative path.
+| 文件 | 含义 |
+|---|---|
+| `pattern_all.yaml` | 实验组：12 个 pattern 任何一个标到的步算 loss |
+| `control_random.yaml` | 对照组：同一批 rollout，每条随机抽同样多的步 |
+| `all_turns.yaml` | 普通 SFT：所有步都算 loss，不调用 Kimi |
 
-A trajectory id is the run id the harness gave the rollout, for example `full50-max-20260909-230641-borden_source_inversion`.
+可改的项：
 
-## Stages
+| 项 | 含义 |
+|---|---|
+| `arm` | `labelled` 标到的步 / `random_matched` 随机抽同样多 / `all` 全部 |
+| `patterns` | 只用其中几个 pattern，如 `[C1, D3]`；空为全部 |
+| `seed` | 随机抽样的种子 |
+| `labelling.sheet` | 标注说明。改了内容就会重新标注，旧结果保留 |
+| `labelling.readings` | Kimi 通读几遍、各用哪份说明 |
+| `labelling.per_url` | 每个 Kimi 地址的并发数 |
 
-Stages 1, 2, 6 and 7 need only Python's standard library. Stages 3 and 5 call an OpenAI-compatible chat endpoint of
-the labelling model and are standard library only too, so they run on the cluster, which has no internet.
+同一个 `--data` 下换策略时，导出和标注直接复用：先跑实验组，再跑对照组只需几秒。
 
-### 1. Export
+### 内部做了什么
 
-    python3 data_pipeline/export_capture.py CAPTURE_DIR [CAPTURE_DIR ...] --out ROWS [--only TEXT]
+`clean.py` 依次做下面几件事，每件的结果都在 `--data` 里：
 
-- `CAPTURE_DIR`: a bridge capture directory with `resp_<id>/{request,upstream-request,upstream-response}.json.gz`
-  (EdgeBench `scripts/kimi_responses_bridge.py --capture-dir`). Several directories are merged (one per bridge).
-- `--only TEXT`: export only rollouts whose capture id contains TEXT (a task name or a run id).
-- Output: `ROWS/<trajectory id>.jsonl` and one summary line per rollout on stdout (`rows`, `skipped`).
+1. **导出**（`rows/<rollout>.jsonl`）：模型的每次回复一行，含它看到的对话、它的回复（思考、文字、工具调用）和工具定义。所有回复都保留。
+2. **渲染**（`work/<rollout>/transcript.txt`）：把这些行排成带步号的日志，第 N 步就是第 N 行；同时用规则找出提交、出结果、结尾这些位置。
+3. **通读**（`work/<rollout>/<名字>.json`）：Kimi 读整条日志，报出规则找不到的位置，比如意外结果、同一方向第二次失败、被搁置的想法。
+4. **标注**（`work/<rollout>/judged-<说明指纹>/`）：每个位置一个请求，Kimi 按 `patterns/label-sheet.md` 回答是非题并填步号。程序检查答案和步号，全部成立才打标签。
+5. **汇总**（`labels-<说明指纹>.jsonl`）：每个标签一条记录。
+6. **选择**（`--output`）：按策略写清单。清单按文件和字节位置指向训练行，不复制数据。没选中的步不算 loss，但仍在后面步的历史里。
 
-A row is one model reply:
+标签只有标和不标。12 个 pattern 的定义就是 `patterns/label-sheet.md` 里各自的是非题；改定义时要同时改
+`data_pipeline/label.py` 里的 `EVIDENCE`，`python -m pytest -q data_pipeline/test_label.py` 会检查两边是否一致。
 
-    {"prompt": [chat messages the model saw],
-     "completion": {"role": "assistant", "content": ..., "reasoning_content": ..., "tool_calls": [...]},
-     "tools": [...],
-     "metadata": {"task": {"id": ..., "seed": 0}, "trajectory_id": ..., "turn": 1.., "time": epoch seconds,
-                  "seconds": ..., "exchange": "resp_...", "finish": ..., "context": "start|continued|rewritten",
-                  "kind": "turn|no_tools", "reasoning_effort": ..., "usage": {...}}}
+## 现状（2026-10-11）
 
-Every reply with HTTP status 200 is kept, whatever the outcome of the run. `context: rewritten` marks the first reply
-after the scaffold replaced the conversation with a summary. Earlier turns inside `prompt` get their reasoning text
-back from the replies captured before them. One rollout of 200 replies is about 80 MB.
-
-### 2. Render
-
-    python3 data_pipeline/rollout.py ROWS/<t>.jsonl --run-dir TASK_DIR --tasks-dir TASKS --out WORK/<t> [--cap 3000]
-
-- `--run-dir`: the harness's directory of this run (`.../harness/runs/<run id>/<task>/` with `run_history.json`,
-  `submissions/`, `final_result.json`). Without it the transcript has no judge records and no submission places.
-- `--tasks-dir`: EdgeBench task specifications (`<task>.json`), for the score direction. Default: maximise.
-- `--cap`: characters kept of one reasoning text, command or output.
-- Output: `transcript.txt` (a head, a line of `=`, the steps), `head.txt`, `points.json`.
-
-Step `#N` is row N: its reasoning (`THINK`), text (`SAY`), command (`$`) and the output that came back. `points.json`
-holds the places a rule finds: `start`, each `submit` command of the agent, the step where its `result` is read,
-and `end`.
-
-### 3–6. Readings, places, labels
-
-All four at once, for every rendered rollout under WORK:
-
-    KIMI_URLS="http://host1:30000/v1 http://host2:30000/v1" PER_URL=2 scripts/label_rollouts.sh WORK labels.jsonl
-
-`KIMI_URLS` defaults to `KIMI_BASE_URL_1..4` from `/personal/kimi.env`. `PER_URL` is the number of concurrent
-labelling requests per address. Finished readings and packets are skipped on a second run. Logs: `WORK/logs/`.
-On the cluster run it inside tmux. The single steps:
-
-    python3 data_pipeline/label.py read WORK/<t> --protocol patterns/timeline-protocol.md --url URL --name timeline
-    python3 data_pipeline/label.py read WORK/<t> --protocol patterns/ideas-protocol.md --url URL --name ideas --context timeline.json
-    python3 data_pipeline/label.py read WORK/<t> --protocol patterns/surprises-protocol.md --url URL --name surprises --context timeline.json
-
-- The labelling model reads the whole transcript and reports places the rules cannot find (an unexpected result, a
-  second failure of one direction, an idea set aside, an expensive start, a record written or read, a probe).
-- `--url`: base URL ending in `/v1`; the model id is taken from `/v1/models`.
-- `--name`: the output file `WORK/<t>/<name>.json`; `<name>.raw.json` keeps the raw answer and the reasoning.
-- `--segment-chars` (1200000): a longer transcript is read in parts of about this size; `--context` gives the later
-  parts another reading's account of the earlier ones.
-- `--max-tokens` (40000), `--tries` (3), `--temperature` (0), `--force` (read again although the output exists).
-
-      python3 data_pipeline/label.py places WORK/<t> --timeline ideas.json surprises.json timeline.json [--batch 1]
-
-- Merges the rule places and the readers' places into `places.json` and cuts `packets/NNNN.json`, `--batch` places per
-  request. Each place names the patterns to look for there.
-
-      python3 data_pipeline/label.py judge WORK/<t> [WORK/<u> ...] --sheet patterns/label-sheet.md --url URL [URL ...] --per-url 2 --name judged
-
-- One request per packet: the sheet, the head, `timeline.json`, the steps around the place (`--window-chars`, 150000)
-  and the packet. The model answers the sheet's questions and names steps; it gives no verdict.
-- `label.py` then decides: a line becomes `"verdict": "done"` only when every answer has the value the sheet asks for,
-  the steps are given in the required order, the steps that must be commands are `RUN` steps, a submit step is a real
-  submit command, and the steps lie inside the span. Otherwise `"verdict": "no"` with the reasons in `gaps`.
-- Output: `WORK/<t>/judged/NNNN.jsonl` and `judged/logs/NNNN.raw.json` (model, usage, sheet SHA-256, raw answer).
-- `--max-tokens` (30000, raised by half after an answer that was cut), `--tries` (3), `--timeline` (timeline.json).
-
-      python3 data_pipeline/label.py labels WORK/* --name judged --out labels.jsonl
-
-- One record per labelled span: `task`, `trajectory_id`, `pattern`, `start`, `end`, `steps`, the place it came from,
-  the model's `answers` and `evidence` steps, `model`, `sheet_sha256`.
-
-### 7. Select
-
-    python3 data_pipeline/select_rows.py --rows ROWS --labels labels.jsonl --out MANIFESTS/<name> [--patterns C1 D3 ...] [--seed 0]
-
-- Output: `MANIFESTS/<name>-pattern.json` (every row a label covers, once) and `MANIFESTS/<name>-control.json` (from
-  each rollout the same number of rows, drawn at random among its ordinary turns with `--seed`).
-- `--patterns`: use only these patterns.
-- A manifest lists rows by source file, byte offset and length; `selection` records the counts per pattern and per
-  rollout and the SHA-256 of the labels file. Rows that are not selected still appear as history inside later rows.
-
-### 8. Train
-
-`training/train_sft.py` reads a manifest and a recipe (`configs/recipes/`); jobs are generated from `jobs/templates/`
-and submitted with `robbyctl`. See State: this part is copied and not yet adapted.
-
-## Labels
-
-A label is binary: a step is selected for a pattern or it is not. The twelve patterns are A1, L1, A4, A2, C1, A3,
-B1, D4, D1, D2, D3, C2; `patterns/label-sheet.md` defines each by its questions. To change what counts, edit the sheet
-and `EVIDENCE` in `data_pipeline/label.py` together; `python -m pytest -q data_pipeline/test_label.py` checks that
-they agree.
-
-## State (2026-10-11)
-
-- Stages 1, 2 and 7 were run on one captured Kimi rollout (212 rows); the manifests load with `data_pipeline/manifest.py`.
-- Stages 3 to 6 are ported from EdgeBench's `scripts/pattern_timeline.py`, where they were tried on seven rollouts
-  against Opus judgements (EdgeBench `patterns/trial-report.md`).
-- `training/`, `jobs/`, `configs/` are copied unchanged from physicalagent-sft-pipeline, branch `feat/flashnext-sft`,
-  commit `dc7854c`. Not yet done: removing the image and robot-task parts (`training/vlm_collator.py` imports
-  `physical_agent.artifact_refs`, which is not copied, so the trainer does not import yet), and a first run. No
-  environment with the training dependencies exists on the workstation, so the `training/` tests were not run here.
-- The Kimi rollouts captured in September 2026 serve to develop the pipeline but not to train: the model hardly
-  reasoned in them (EdgeBench `docs/kimi-serving.md`). Training rollouts need the bridge with reasoning history.
-- Not written yet: choosing rollouts by final result for the control arm, a validation split, and an audit step
-  that samples labelled rows for a second opinion.
+- 清洗：`all_turns.yaml` 在一条 Kimi rollout 上跑通（212 行）。需要 Kimi 的两种策略，其标注部分是从 EdgeBench 移植的
+  （在那边用 7 条 rollout 对照 Opus 测过），在本仓库的入口下还在调试。
+- 训练：`training/`、`jobs/`、`configs/recipes`、`configs/training` 是从 physicalagent-sft-pipeline
+  （分支 `feat/flashnext-sft`，提交 `dc7854c`）原样复制的，还没去掉图像和机器人相关的部分，目前不能运行。
+- 2026 年 9 月的 Kimi rollout 只能用来调流程，不能用来训练：那批数据里模型几乎不思考（见 EdgeBench `docs/kimi-serving.md`）。
+- 还没做：按最终成绩筛选 rollout、验证集划分、对标注结果的抽查。

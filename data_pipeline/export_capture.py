@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the model exchanges a bridge captured into SFT rows: one JSONL file per rollout, one row per model reply.
 
-    export_capture.py CAPTURE_DIR [CAPTURE_DIR ...] --out DIR [--only SUBSTRING]
+Used by clean.py; on its own: export_capture.py CAPTURE_DIR [CAPTURE_DIR ...] --out DIR [--only SUBSTRING]
 
 CAPTURE_DIR holds `resp_<id>/{request,upstream-request,upstream-response}.json.gz` as written by EdgeBench's
 `scripts/kimi_responses_bridge.py --capture-dir`. Exchanges are grouped by the capture id the harness sent
@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -41,26 +42,31 @@ def load(path):
 
 
 def scan(roots, only):
-    """{capture id: [(time, exchange dir)]} without reading the large files twice."""
+    """{capture id: [(time, exchange dir)]}. Reads every request once, in threads: a capture tree holds tens of thousands."""
+    def one(path):
+        try:
+            request = load(os.path.join(path, "request.json.gz"))
+        except (OSError, ValueError):
+            return None
+        return request.get("capture_id") or "unknown", request.get("timestamp") or 0, path
+
+    paths = [entry.path for root in roots for entry in os.scandir(root) if entry.name.startswith("resp_")]
     found = {}
-    for root in roots:
-        for entry in os.scandir(root):
-            if not entry.name.startswith("resp_"):
-                continue
-            try:
-                request = load(os.path.join(entry.path, "request.json.gz"))
-            except (OSError, ValueError):
-                continue
-            ident = request.get("capture_id") or "unknown"
-            if only and only not in ident:
-                continue
-            found.setdefault(ident, []).append((request.get("timestamp") or 0, entry.path))
+    with ThreadPoolExecutor(16) as pool:
+        for hit in pool.map(one, paths):
+            if hit and (not only or only in hit[0]):
+                found.setdefault(hit[0], []).append(hit[1:])
     return found
 
 
-def export(ident, exchanges, out):
+def identity(ident):
+    """(task, trajectory id) of a capture id `sforge.run.<task>.<run id>`."""
     match = re.match(r"sforge\.run\.([^.]+)\.(.+)$", ident)
-    task, run = (match.group(1), match.group(2)) if match else (ident, ident)
+    return (match.group(1), match.group(2)) if match else (ident, ident)
+
+
+def export(ident, exchanges, out):
+    task, run = identity(ident)
     reasoning, rows, skipped, before = {}, 0, {}, None
     target = out / f"{run}.jsonl"
     with open(target.with_suffix(".tmp"), "w", encoding="utf-8") as stream:
