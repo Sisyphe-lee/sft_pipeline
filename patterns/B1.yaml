@@ -1,0 +1,20 @@
+name: B1
+title: Back to the best version
+places:
+- result
+- end
+questions:
+- id: files_not_best
+  expect: true
+  text: at this point the files a submission would take are not the best judged version.
+- id: built_on_worse
+  expect: false
+  text: it made further changes on top of the worse version before going back.
+- id: best_back
+  expect: true
+  text: it puts the best version back.
+steps:
+- id: restore_step
+  run: true
+  inside: true
+  text: the command that puts it back

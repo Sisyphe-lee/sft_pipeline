@@ -1,0 +1,29 @@
+name: D2
+title: Reopen an idea that was set aside
+places:
+- set_aside
+- end
+questions:
+- id: named_and_untested
+  expect: true
+  text: the agent named something it could do and did not do it.
+- id: tested_soon_after
+  expect: false
+  text: it tested the thing soon after, before any stall.
+- id: stalled_after
+  expect: true
+  text: afterwards several attempts brought no new best, or it said nothing was left to try.
+- id: reopened_same_idea
+  expect: true
+  text: it went back to that same idea, not to a new one.
+- id: test_reached_idea
+  expect: true
+  text: the test it ran tried the idea itself and gave an answer about it. A test that failed for another reason first does not count.
+steps:
+- id: named_step
+  then: <
+- id: stall_step
+  then: <=
+- id: test_step
+  run: true
+  inside: true

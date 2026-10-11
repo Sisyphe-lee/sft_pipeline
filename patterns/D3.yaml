@@ -1,0 +1,28 @@
+name: D3
+title: Keep a record of what was tried, and look back at it
+places:
+- record
+- redo
+- end
+questions:
+- id: record_file
+  expect: true
+  text: 'there is a file that holds results of earlier experiments: what was tried and the number or outcome it gave. A notes file, a results table and a log that the agent''s scripts append to all count. The judge''s submission list and plain copies of versions do not.'
+- id: read_back_later
+  expect: true
+  text: in a later command the agent reads that file to see results of earlier experiments. Looking at the output of the run it has just made is not a look back.
+- id: read_feeds_decision
+  expect: true
+  text: what it read is used in the choice of what to do next.
+steps:
+- id: write_step
+  run: true
+  then: <
+- id: read_step
+  run: true
+  inside: true
+  then: <=
+- id: decision_step
+notes:
+- 'Also `"file"`: the name of the file.'
+- '`start` and `end`: the read-back and the decision.'

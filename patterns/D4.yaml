@@ -1,0 +1,24 @@
+name: D4
+title: Leave a direction that failed twice
+places:
+- second_failure
+questions:
+- id: same_direction_twice
+  expect: true
+  text: one direction or premise that you can name had at least two attempts without improvement by this step.
+- id: results_moving
+  expect: false
+  text: each attempt was guided by new evidence and the results were improving.
+- id: more_than_one_further
+  expect: false
+  text: after this step the agent makes two or more further attempts in the direction.
+- id: came_back_later
+  expect: false
+  text: it returns to the direction later without new evidence.
+steps:
+- id: first_failure_step
+  then: <
+- id: second_failure_step
+  then: <=
+- id: leave_step
+  text: the first step of the other work

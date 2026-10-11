@@ -1,0 +1,35 @@
+name: C1
+title: Check the reason of an unexpected result before changing anything
+places:
+- unexpected
+- result
+questions:
+- id: as_expected
+  expect: false
+  text: the result is what the agent expected, or one more step of a trend it has already seen, or the success of what it just tried.
+- id: message_gives_cause
+  expect: false
+  text: the output itself says what is wrong (an error message, a refusal that names its reason), so nothing is left to find out.
+- id: ran_a_check
+  expect: true
+  text: after the result the agent ran a command whose purpose was to find the reason. Reading the same output again, or reasoning, is not a check.
+- id: check_can_answer
+  expect: true
+  text: 'the check''s output bears on the reason: it could have confirmed or ruled out a cause.'
+- id: changed_before_check
+  expect: false
+  text: it changed the solution or submitted again before the check.
+- id: stated_finding
+  expect: true
+  text: it says what the check showed, and its next step follows from that.
+steps:
+- id: result_step
+  then: <
+- id: check_step
+  run: true
+  inside: true
+  then: <=
+- id: finding_step
+  inside: true
+notes:
+- 'Also `"source"`: `"judge"` when the unexpected result is a judge answer, `"local"` otherwise.'

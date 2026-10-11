@@ -1,0 +1,25 @@
+name: C2
+title: A small trial before something expensive
+places:
+- expensive_start
+questions:
+- id: costly
+  expect: true
+  text: the thing started runs five minutes or more, or is a large implementation resting on an unchecked idea. A submission is not such a start.
+- id: small_version_first
+  expect: true
+  text: before it, the agent ran a smaller version of this same thing (a short run, a small input, a timing measurement, a tiny case against a known answer). An earlier experiment with another purpose is not a trial of this one.
+- id: trial_can_tell
+  expect: true
+  text: the trial could have shown that the idea or the run would fail. A syntax or import check cannot.
+- id: trial_result_used
+  expect: true
+  text: the result is what the agent goes ahead, adjusts or cancels by.
+steps:
+- id: trial_step
+  run: true
+  inside: true
+  then: <
+- id: launch_step
+  run: true
+  inside: true

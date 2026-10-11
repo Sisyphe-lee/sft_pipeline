@@ -1,0 +1,27 @@
+name: L1
+title: A local number before submitting
+places:
+- submit
+questions:
+- id: meant_to_score
+  expect: true
+  text: the submission is meant to score. False for a first look at the judge and for a submission made to learn something.
+- id: measured_this_version
+  expect: true
+  text: a local run printed a score-like number for exactly the version that is submitted.
+- id: changed_after_measuring
+  expect: false
+  text: a file of the solution changed between that run and the submit command.
+- id: number_says_submit
+  expect: true
+  text: the number is at least as good as the best so far, or the agent gives it as the reason to submit.
+steps:
+- id: measure_step
+  run: true
+  inside: true
+  then: <
+  text: prints the number
+- id: submit_step
+  run: true
+  submit: true
+  inside: true

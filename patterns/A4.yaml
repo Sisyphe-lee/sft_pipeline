@@ -1,0 +1,17 @@
+name: A4
+title: One change per submission
+places:
+- submit
+questions:
+- id: changed_and_meant_to_compare
+  expect: true
+  text: the submission differs from the last judged version and the agent will read the score to learn whether the change helped. False for the first submission, for unchanged files, and for a submission made to learn a fact about the judge.
+- id: one_idea_or_each_measured
+  expect: true
+  text: everything changed since the last judged version implements one idea, or every change was measured on its own beforehand.
+steps:
+- id: first_edit_step
+  then: <=
+- id: submit_step
+  run: true
+  submit: true

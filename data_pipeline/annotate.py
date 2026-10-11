@@ -4,16 +4,16 @@
     python3 data_pipeline/annotate.py --config configs/labelling/kimi_v1.yaml \\
         --capture CAPTURE_DIR [CAPTURE_DIR ...] --runs RUNS_DIR --tasks TASKS_DIR --data DATA_DIR
 
-写出 DATA_DIR/rows/（训练行）和 DATA_DIR/labels-<说明指纹>.jsonl（标签）。已完成的部分会跳过：
-中断后重跑同一条命令即可，新增 rollout 时只标新增的。选数据见 select_rows.py。
+写出 DATA_DIR/rows/（训练行）和 DATA_DIR/labels.jsonl（标签）。只问还没问过的：中断后重跑即可，
+新增 rollout 只标新增的，改了某个 patterns/<名字>.yaml 只重标这一个 pattern。选数据见 select_rows.py。
 """
 import argparse
-import hashlib
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -24,7 +24,7 @@ import label  # noqa: E402
 import rollout  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULTS = dict(sheet="patterns/label-sheet.md", readings=["timeline", "ideas", "surprises"], per_url=2, window_chars=150000,
+DEFAULTS = dict(patterns=[], readings=["timeline", "ideas", "surprises"], per_url=2, window_chars=150000,
                 read_max_tokens=40000, judge_max_tokens=30000, render_cap=3000)
 
 
@@ -88,21 +88,22 @@ def main():
                                               max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}", force=False,
                                               segment_chars=1200000, context=f"{lab['readings'][0]}.json" if k else None))
             if not (d / "places.json").exists():
-                label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in lab["readings"][1:] + lab["readings"][:1]], batch=1))
+                label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in lab["readings"][1:] + lab["readings"][:1]]))
 
     threads = [threading.Thread(target=reader, args=(u,)) for u in urls for _ in range(lab["per_url"])]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    # 5. label: the model answers the sheet's questions for every place; label.py decides
-    sheet = REPO / lab["sheet"]
-    version = hashlib.sha256(sheet.read_bytes()).hexdigest()[:8]
-    label.judge(argparse.Namespace(dirs=[str(d) for d in dirs], sheet=[str(sheet)], url=urls, per_url=lab["per_url"], name=f"judged-{version}",
-                                   packets="packets", timeline=f"{lab['readings'][0]}.json", window_chars=lab["window_chars"],
+    # 5. label: one question per place and pattern; only what the current pattern files have not been asked yet
+    label.judge(argparse.Namespace(dirs=[str(d) for d in dirs], url=urls, per_url=lab["per_url"], patterns=lab["patterns"],
+                                   timeline=f"{lab['readings'][0]}.json", window_chars=lab["window_chars"],
                                    max_tokens=lab["judge_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra="{}"))
-    labels = args.data / f"labels-{version}.jsonl"
-    label.labels(argparse.Namespace(dirs=[str(d) for d in dirs], name=f"judged-{version}", out=str(labels)))
+    # 6. the labels of the current pattern versions; the file before this run is kept beside it
+    labels = args.data / "labels.jsonl"
+    if labels.exists():
+        labels.replace(args.data / f"labels.before-{time.strftime('%Y%m%d-%H%M%S')}.jsonl")
+    label.labels(argparse.Namespace(dirs=[str(d) for d in dirs], out=str(labels)))
     print(f"labels: {labels}")
 
 

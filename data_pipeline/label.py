@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Find and label the steps of a rendered rollout that show a behaviour pattern (patterns/README.md).
+"""The labelling steps that annotate.py runs on a rendered rollout (DIR, written by rollout.py).
 
-    label.py read DIR --protocol patterns/timeline-protocol.md --url URL       # DIR/timeline.json: a reader model's account, long logs in parts
-    label.py places DIR --timeline ideas.json surprises.json timeline.json     # DIR/places.json, DIR/packets/: where to look, from rules and readers
-    label.py judge DIR [DIR ...] --sheet patterns/label-sheet.md --url URL [URL ...] --name judged   # the model answers the sheet's questions per place
-    label.py labels DIR [DIR ...] --name judged --out labels.jsonl             # one record per labelled span, for the selection step
+    label.py read DIR --protocol patterns/timeline-protocol.md --url URL    # DIR/timeline.json: a reader model's account, long logs in parts
+    label.py places DIR --timeline ideas.json surprises.json timeline.json  # DIR/places.json: where to look, from rules and readings
+    label.py judge DIR [DIR ...] --url URL [URL ...]                        # DIR/labels/<pattern>-<sha>/<place>.json
+    label.py labels DIR [DIR ...] --out labels.jsonl                        # the labels of the current pattern versions
 
-DIR is written by rollout.py. A span gets a label only when the model's answers and steps satisfy the sheet
-(EVIDENCE below mirrors the sheet; test_label.py checks that they agree). Standard library only: it runs where the
-model is served.
+A pattern is one file, patterns/<name>.yaml. The model is asked about one place and one pattern at a time, and its
+answer is kept under the pattern's fingerprint: after an edit of one pattern file only that pattern is asked again.
 """
 import argparse
 import hashlib
@@ -20,23 +19,66 @@ import time
 import urllib.request
 from pathlib import Path
 
-# reader moment type -> patterns to judge there
-READER = {
-    "unexpected": ["C1"],
-    "second_failure": ["D4", "D1"],
-    "set_aside": ["D2"],
-    "expensive_start": ["C2"],
-    "record": ["D3"],
-    "redo": ["D3"],
-    "probe": ["A3"],
-}
-# rule point kind -> patterns to judge there
-RULE = {
-    "start": ["A1"],
-    "submit": ["L1", "A4"],
-    "result": ["A2", "C1", "A3", "B1"],
-    "end": ["B1", "D3", "D2"],
-}
+PATTERN_DIR = Path(__file__).resolve().parents[1] / "patterns"
+RULE_PLACES = ("start", "submit", "result", "end")  # found by rollout.py; every other place type comes from a reading
+
+
+def load_patterns(directory=PATTERN_DIR):
+    """(shared instructions, {name: pattern}). A pattern is one YAML file: the place types where it is looked for, its
+    yes/no questions with the answer the behaviour needs, and its steps in order. `sha` is the fingerprint of everything
+    that decides its labels, so editing one pattern file invalidates the labels of that pattern only."""
+    import yaml
+    common = (directory / "common.md").read_text()
+    patterns = {}
+    for path in sorted(directory.glob("*.yaml")):
+        text = path.read_text()
+        pattern = yaml.safe_load(text)
+        pattern["sha"] = hashlib.sha256((common + "\n" + text).encode()).hexdigest()[:8]
+        patterns[pattern["name"]] = pattern
+    return common, patterns
+
+
+def pattern_text(pattern):
+    """A pattern as the labelling model reads it."""
+    lines = [f"{pattern['name']}: {pattern['title']}", "Questions:"]
+    lines += [f"- `{q['id']}` [{str(q['expect']).lower()}]: {q['text']}" for q in pattern["questions"]]
+    chain = ""
+    for step in pattern["steps"]:
+        notes = ", ".join(x for x in ("RUN" if step.get("run") else "", step.get("text", "")) if x)
+        chain += f"`{step['id']}`" + (f" ({notes})" if notes else "") + (f" {'<' if step['then'] == '<' else '≤'} " if step.get("then") else "")
+    lines.append("Steps: " + chain + ".")
+    return "\n".join(lines + [f"- {note}" for note in pattern.get("notes", [])])
+
+
+def label_gaps(pattern, row, kinds, submits):
+    """Why the model's answers and steps do not make a label: a list, empty when they do."""
+    answers = row.get("answers") if isinstance(row.get("answers"), dict) else {}
+    steps = row.get("steps") if isinstance(row.get("steps"), dict) else {}
+    gaps = [f"{q['id']} is not {str(q['expect']).lower()}" for q in pattern["questions"] if answers.get(q["id"]) is not q["expect"]]
+    given = {}
+    for step in pattern["steps"]:
+        n = steps.get(step["id"])
+        if isinstance(n, int) and not isinstance(n, bool) and n in kinds:
+            given[step["id"]] = n
+        else:
+            gaps.append(f"{step['id']} missing")
+    for a, b in zip(pattern["steps"], pattern["steps"][1:]):
+        if a["id"] in given and b["id"] in given and not (given[a["id"]] < given[b["id"]] if a["then"] == "<" else given[a["id"]] <= given[b["id"]]):
+            gaps.append(f"{a['id']} not {a['then']} {b['id']}")
+    whole = isinstance(row.get("start"), int) and isinstance(row.get("end"), int)
+    if not whole:
+        gaps.append("no span")
+    for step in pattern["steps"]:
+        n = given.get(step["id"])
+        if n is None:
+            continue
+        if step.get("run") and kinds[n] != "RUN":
+            gaps.append(f"{step['id']} is not a RUN step")
+        if step.get("submit") and not any(abs(n - x) <= 2 for x in submits):
+            gaps.append(f"{step['id']} is not a submit command")
+        if step.get("inside") and whole and not row["start"] <= n <= row["end"]:
+            gaps.append(f"{step['id']} outside the span")
+    return gaps
 
 
 def parse_json(text):
@@ -164,63 +206,6 @@ def read(args):
     target.write_text(json.dumps(account, ensure_ascii=False, indent=1))
 
 
-# What a label needs (patterns/label-sheet.md): answers that must have a value, steps that must be given in this order,
-# which of them must be RUN steps, be submit commands, and lie inside the span.
-EVIDENCE = {
-    "A1": dict(need=dict(improved_before_first_submit=False, read_answer=True), chain=["submit_step", "<=", "read_step"], run=["submit_step"], submit=["submit_step"]),
-    "L1": dict(need=dict(meant_to_score=True, measured_this_version=True, changed_after_measuring=False, number_says_submit=True),
-               chain=["measure_step", "<", "submit_step"], run=["measure_step", "submit_step"], submit=["submit_step"], inside=["measure_step", "submit_step"]),
-    "A4": dict(need=dict(changed_and_meant_to_compare=True, one_idea_or_each_measured=True), chain=["first_edit_step", "<=", "submit_step"],
-               run=["submit_step"], submit=["submit_step"]),
-    "A2": dict(need=dict(saw_parts=True, planned_before_result=False, part_names_target=True), chain=["result_step", "<", "work_step"], inside=["work_step"]),
-    "C1": dict(need=dict(as_expected=False, message_gives_cause=False, ran_a_check=True, check_can_answer=True, changed_before_check=False, stated_finding=True),
-               chain=["result_step", "<", "check_step", "<=", "finding_step"], run=["check_step"], inside=["check_step", "finding_step"]),
-    "A3": dict(need=dict(judge_only_fact=True, step_on_known_trend=False, question_before=True, answer_used=True, left_on_probe=False),
-               chain=["question_step", "<=", "submit_step", "<=", "answer_step"], run=["submit_step"], submit=["submit_step"], inside=["submit_step"]),
-    "B1": dict(need=dict(files_not_best=True, built_on_worse=False, best_back=True), chain=["restore_step"], run=["restore_step"], inside=["restore_step"]),
-    "D4": dict(need=dict(same_direction_twice=True, results_moving=False, more_than_one_further=False, came_back_later=False),
-               chain=["first_failure_step", "<", "second_failure_step", "<=", "leave_step"]),
-    "D1": dict(need=dict(left_direction=True, new_kind_of_evidence=True, used_for_next_change=True),
-               chain=["leave_step", "<=", "evidence_step", "<=", "finding_step"], run=["evidence_step"], inside=["evidence_step", "finding_step"]),
-    "D2": dict(need=dict(named_and_untested=True, tested_soon_after=False, stalled_after=True, reopened_same_idea=True, test_reached_idea=True),
-               chain=["named_step", "<", "stall_step", "<=", "test_step"], run=["test_step"], inside=["test_step"]),
-    "D3": dict(need=dict(record_file=True, read_back_later=True, read_feeds_decision=True),
-               chain=["write_step", "<", "read_step", "<=", "decision_step"], run=["write_step", "read_step"], inside=["read_step"]),
-    "C2": dict(need=dict(costly=True, small_version_first=True, trial_can_tell=True, trial_result_used=True),
-               chain=["trial_step", "<", "launch_step"], run=["trial_step", "launch_step"], inside=["trial_step", "launch_step"]),
-}
-
-
-def evidence_gaps(row, kinds, submits):
-    """Why a line's own answers and steps do not make a label: a list, empty when they do."""
-    spec = EVIDENCE.get(row.get("pattern"))
-    if not spec:
-        return ["unknown pattern"]
-    answers = row.get("answers") if isinstance(row.get("answers"), dict) else {}
-    steps = row.get("steps") if isinstance(row.get("steps"), dict) else {}
-    gaps = [f"{k} is not {str(v).lower()}" for k, v in spec["need"].items() if answers.get(k) is not v]
-    if spec.get("either") and not any(answers.get(k) is True for k in spec["either"]):
-        gaps.append("neither " + " nor ".join(spec["either"]))
-    names = spec["chain"][::2]
-    given = {}
-    for name in names:
-        n = steps.get(name)
-        if isinstance(n, int) and not isinstance(n, bool) and n in kinds:
-            given[name] = n
-        elif not (n is None and name in spec.get("optional", [])):
-            gaps.append(f"{name} missing")
-    for a, op, b in zip(names, spec["chain"][1::2], names[1:]):
-        if a in given and b in given and not (given[a] < given[b] if op == "<" else given[a] <= given[b]):
-            gaps.append(f"{a} not {op} {b}")
-    gaps += [f"{n} is not a RUN step" for n in spec.get("run", []) if n in given and kinds[given[n]] != "RUN"]
-    gaps += [f"{n} is not a submit command" for n in spec.get("submit", []) if n in given and not any(abs(given[n] - x) <= 2 for x in submits)]
-    if isinstance(row.get("start"), int) and isinstance(row.get("end"), int):
-        gaps += [f"{n} outside the span" for n in spec.get("inside", []) if n in given and not row["start"] <= given[n] <= row["end"]]
-    else:
-        gaps.append("no span")
-    return gaps
-
-
 def window(body, lo, hi, limit):
     """The log if it fits in `limit` characters, else the steps lo..hi with as much around them as fits (more before than after):
     (first step, last step, text)."""
@@ -242,12 +227,12 @@ def window(body, lo, hi, limit):
 
 
 def judge(args):
-    """Judge the packets of rendered rollouts with the served model. It has no file tools, so each request carries the
-    sheet, the head, the other reader's account, the log (or the part of it around the packet) and the packet."""
-    sheet = Path(args.sheet[0]).read_text()
-    for more in args.sheet[1:]:  # sheets that the first one refers to, or that add to it
-        sheet += "\n\n" + "=" * 100 + "\n" + Path(more).name + "\n" + "=" * 100 + "\n\n" + Path(more).read_text()
-    args.protocol = " ".join(args.sheet)
+    """Ask the served model about every (place, pattern) of rendered rollouts that has no answer yet for the pattern's
+    current version. One request holds the shared instructions, the head, the other reader's account, the steps around
+    the place, one pattern and the place. Answers go to DIR/labels/<pattern>-<sha>/<place id>.json."""
+    common, patterns = load_patterns()
+    wanted = set(args.patterns or patterns)
+    args.protocol = "patterns/common.md"
     urls = [u.rstrip("/") for u in args.url]
     models = {}
     for u in urls:
@@ -256,12 +241,12 @@ def judge(args):
     jobs = []
     for d in args.dirs:
         out = Path(d)
-        (out / args.name / "logs").mkdir(parents=True, exist_ok=True)
-        for packet in sorted((out / args.packets).glob("*.json")):
-            if not (out / args.name / (packet.stem + ".jsonl")).exists():
-                jobs.append((out, packet))
-    print(f"{len(jobs)} packets to judge on {len(urls)} URLs x {args.per_url}", flush=True)
-    lock, busy = threading.Lock(), {}
+        for place in json.loads((out / "places.json").read_text()):
+            for name in place["patterns"]:
+                if name in wanted and name in patterns and not (out / "labels" / f"{name}-{patterns[name]['sha']}" / f"{place['id']}.json").exists():
+                    jobs.append((out, place, patterns[name]))
+    print(f"{len(jobs)} questions to ask on {len(urls)} URLs x {args.per_url}", flush=True)
+    lock, busy, shared = threading.Lock(), {}, {}
 
     def take(me, last):  # a worker stays on one rollout while it can: the server keeps the log it has just read
         with lock:
@@ -275,68 +260,49 @@ def judge(args):
                 busy.pop(me, None)
             return job
 
-    def one(base, out, packet):
-        items = json.loads(packet.read_text())
-        key = "moment" if "patterns" in items[0] else "item"
-        wanted = {(i["id"], p) for i in items for p in i.get("patterns", [i.get("pattern")])}
-        near = [n for i in items for n in [i.get("step"), i.get("start"), i.get("end"), (i.get("located") or {}).get("step")] + list(i.get("steps") or [])
-                if isinstance(n, int)]
-        head, _, body = (out / "transcript.txt").read_text().partition("\n" + "=" * 100 + "\n")
-        lo, hi, text = window(body, min(near), max(near), args.window_chars)
-        points = json.loads((out / "points.json").read_text())
-        first, last = points["steps"]
-        cut = (lo, hi) != (first, last)
-        kinds = {int(n): kind for n, kind in re.findall(r"^#(\d+) \S+ ([A-Z]+)", body, re.M)}
-        submits = [x["step"] for x in points["points"] if x["kind"] == "submit"]
-        user = ("You have no file tools here. Everything the instructions call material is in this message: HEAD (head.txt), TIMELINE "
-                f"({args.timeline}), LOG (the steps) and PACKET (the batch or packet file to judge).\n"
-                + (f"The log is too long to show whole. You get steps #{lo} to #{hi} of #{first} to #{last}; the timeline says what happened "
-                   "outside them. Judge by the steps you can see: when a verdict would need steps you cannot see, give the lower verdict and say so in `why`.\n" if cut else "")
-                + "=" * 100 + "\nHEAD\n" + head + "\n" + "=" * 100 + "\nTIMELINE\n" + (out / args.timeline).read_text() + "\n"
-                + "=" * 100 + "\nLOG\n" + text + "\n" + "=" * 100 + "\nPACKET\n" + json.dumps(items, ensure_ascii=False, indent=1) + "\n" + "=" * 100
-                + "\nWrite the output lines as your answer: one JSON object per line and nothing else, a line for every "
-                + ("pattern of every moment" if key == "moment" else "span") + " in the packet."
-                + ("" if key == "moment" else ' Each line names its span with "item" (the span\'s id) where a moment line would have "moment".'))
-        limit, best = args.max_tokens, None
+    def material(out):
+        with lock:
+            if out not in shared:
+                head, _, body = (out / "transcript.txt").read_text().partition("\n" + "=" * 100 + "\n")
+                points = json.loads((out / "points.json").read_text())
+                shared[out] = dict(head=head, body=body, timeline=(out / args.timeline).read_text(), first=points["steps"][0], last=points["steps"][1],
+                                   kinds={int(n): kind for n, kind in re.findall(r"^#(\d+) \S+ ([A-Z]+)", body, re.M)},
+                                   submits=[x["step"] for x in points["points"] if x["kind"] == "submit"])
+            return shared[out]
+
+    def one(base, out, place, pattern):
+        m = material(out)
+        near = [n for n in [place.get("step")] + list(place.get("steps") or []) if isinstance(n, int)]
+        lo, hi, text = window(m["body"], min(near), max(near), args.window_chars)
+        # the pattern and the place come last: the requests for one place share everything before them
+        user = ("=" * 100 + "\nHEAD\n" + m["head"] + "\n" + "=" * 100 + "\nTIMELINE\n" + m["timeline"] + "\n" + "=" * 100
+                + f"\nLOG (steps #{lo} to #{hi} of #{m['first']} to #{m['last']})\n" + text + "\n" + "=" * 100 + "\nPATTERN\n" + pattern_text(pattern) + "\n"
+                + "=" * 100 + "\nPLACE\n" + json.dumps({k: v for k, v in place.items() if k != "patterns"}, ensure_ascii=False, indent=1) + "\n" + "=" * 100
+                + "\nWrite your answer now: one JSON object on one line.")
+        limit = args.max_tokens
         for attempt in range(1, args.tries + 1):
             began = time.time()
             try:
-                local = argparse.Namespace(**dict(vars(args), max_tokens=limit))
-                meta, msg = ask(base, models[base], sheet, user, local)
-                meta.update(attempt=attempt, steps_shown=[lo, hi], max_tokens=limit, sheet_sha256=hashlib.sha256(sheet.encode()).hexdigest())
-                (out / args.name / "logs" / f"{packet.stem}.raw.json").write_text(
-                    json.dumps(dict(meta=meta, content=msg.get("content"), reasoning=msg.get("reasoning_content")), ensure_ascii=False, indent=1))
+                meta, msg = ask(base, models[base], common, user, argparse.Namespace(**dict(vars(args), max_tokens=limit)))
                 if meta["finish"] == "length":
                     limit = limit * 3 // 2
                     raise ValueError(f"answer cut at max_tokens; next attempt gets {limit}")
-                rows = []
-                for line in (msg.get("content") or "").splitlines():
-                    line = line.strip().rstrip(",")
-                    if line.startswith("{"):
-                        try:
-                            row = json.loads(line, strict=False)
-                            row.setdefault("verdict", "done")  # the sheet asks for answers and steps, not for a verdict
-                            row["pattern"], row["verdict"]
-                            rows.append(row)
-                        except (ValueError, KeyError, TypeError):
-                            pass
-                for row in rows:  # the label: `done` only when the line's own answers and steps carry it
-                    gaps = evidence_gaps(row, kinds, submits) if row["verdict"] == "done" else []
-                    if gaps:
-                        row.update(verdict="no", gaps=gaps)
-                missing = wanted - {(r.get(key), r["pattern"]) for r in rows}
-                if best is None or len(missing) < best[0]:
-                    best = (len(missing), rows, meta)
-                if missing:
-                    raise ValueError(f"{len(missing)} of {len(wanted)} lines missing")
-                break
+                row = parse_json(msg.get("content") or "")
+                gaps = label_gaps(pattern, row, m["kinds"], m["submits"])
+                record = dict(place=place["id"], pattern=pattern["name"], sha=pattern["sha"], label=not gaps, start=row.get("start"), end=row.get("end"),
+                              answers=row.get("answers"), steps=row.get("steps"), gaps=gaps, why=row.get("why"), quote=row.get("quote"),
+                              **{k: row[k] for k in ("source", "file") if k in row},
+                              meta=dict(model=meta["model"], url=base, seconds=meta["seconds"], usage=meta["usage"], attempt=attempt, steps_shown=[lo, hi]),
+                              reasoning=msg.get("reasoning_content"))
+                target = out / "labels" / f"{pattern['name']}-{pattern['sha']}" / f"{place['id']}.json"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.with_suffix(".tmp").write_text(json.dumps(record, ensure_ascii=False, indent=1))
+                target.with_suffix(".tmp").replace(target)
+                print(f"done {out.name} {place['id']} {pattern['name']}: {'label' if not gaps else 'no'}, {meta['seconds']}s", flush=True)
+                return
             except Exception as error:  # noqa: BLE001 - log and retry whatever the server or the parser raised
-                print(f"{out.name} {packet.stem}: attempt {attempt} failed after {round(time.time() - began)}s: {type(error).__name__} {error}", flush=True)
+                print(f"{out.name} {place['id']} {pattern['name']}: attempt {attempt} failed after {round(time.time() - began)}s: {type(error).__name__} {error}", flush=True)
                 time.sleep(20)
-        if best is None:
-            return
-        (out / args.name / (packet.stem + ".jsonl")).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in best[1]))
-        print(f"done {out.name} {packet.stem}: {len(best[1])} lines, {best[0]} missing, {best[2]['seconds']}s, usage {best[2]['usage']}", flush=True)
 
     def worker(me, base):
         last = None
@@ -356,6 +322,10 @@ def judge(args):
 
 def places(args):
     out = Path(args.dir)
+    at = {}  # place type -> the patterns looked for there
+    for name, pattern in load_patterns()[1].items():
+        for kind in pattern["places"]:
+            at.setdefault(kind, []).append(name)
     rule = json.loads((out / "points.json").read_text())
     timeline = dict(moments=[])
     for name in args.timeline:  # several reader passes: a moment of the same type within two steps of one from an earlier pass is the same moment
@@ -374,10 +344,10 @@ def places(args):
 
     rows = []
     for p in rule["points"]:
-        if p["kind"] not in RULE:
+        if p["kind"] not in at:
             continue
         facts = {k: p[k] for k in ("round", "score", "best_before", "mark", "first_submit_min", "note", "matched_by", "located_by") if k in p}
-        rows.append(dict(src="rule", type=p["kind"], step=p["step"], steps=p["steps"], patterns=RULE[p["kind"]], facts=facts))
+        rows.append(dict(src="rule", type=p["kind"], step=p["step"], steps=p["steps"], patterns=at[p["kind"]], facts=facts))
     restores = sorted(int(m["step"]) for m in timeline.get("moments", []) if m.get("type") == "restore" and str(m.get("step", "")).isdigit())
     for row in rows:  # where the reader saw the files put back: a fact for B1, which is judged at results and at the end
         later = [n for n in restores if n > row["step"]]
@@ -386,7 +356,7 @@ def places(args):
         if row["type"] == "end":
             row["facts"]["restores_seen_by_reader"] = restores
     for m in timeline.get("moments", []):
-        if m.get("type") not in READER:
+        if m.get("type") not in at or m.get("type") in RULE_PLACES:
             continue
         try:
             step = clamp(m["step"])
@@ -402,49 +372,47 @@ def places(args):
         if same:
             same["facts"].setdefault("reader_notes", []).append(dict(facts, type=m["type"], step=step))
             continue
-        rows.append(dict(src="reader", type=m["type"], step=step, steps=[min(lo, step), max(hi, step)], patterns=READER[m["type"]], facts=facts))
+        rows.append(dict(src="reader", type=m["type"], step=step, steps=[min(lo, step), max(hi, step)], patterns=at[m["type"]], facts=facts))
     rows.sort(key=lambda x: (x["step"], x["src"] != "rule"))
     for k, row in enumerate(rows, 1):
         row["id"] = f"m{k:03d}"
     (out / "places.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1))
-    batches = out / "packets"
-    batches.mkdir(exist_ok=True)
-    for old in batches.glob("*.json"):
-        old.unlink()
-    for b in range(0, len(rows), args.batch):
-        (batches / f"{b // args.batch + 1:04d}.json").write_text(json.dumps(rows[b:b + args.batch], ensure_ascii=False, indent=1))
     kinds = {}
     for row in rows:
         kinds[f"{row['src']}:{row['type']}"] = kinds.get(f"{row['src']}:{row['type']}", 0) + 1
-    print(f"{out.name}: {len(rows)} places in {(len(rows) + args.batch - 1) // args.batch} packets {kinds}")
+    print(f"{out.name}: {len(rows)} places, {sum(len(r['patterns']) for r in rows)} questions {kinds}")
 
 
 def labels(args):
-    """Collect the labelled spans of rendered rollouts into one JSONL file: the input of the selection step."""
-    count, per = 0, {}
+    """Collect the labels of rendered rollouts, for the current version of every pattern, into one JSONL file."""
+    _, patterns = load_patterns()
+    count, per, missing = 0, {}, 0
     with open(args.out, "w", encoding="utf-8") as stream:
         for d in args.dirs:
             out = Path(d)
             points = json.loads((out / "points.json").read_text())
-            index = {m["id"]: m for m in json.loads((out / "places.json").read_text())}
             seen = set()
-            for path in sorted((out / args.name).glob("*.jsonl")):
-                meta = json.loads((out / args.name / "logs" / (path.stem + ".raw.json")).read_text())["meta"]
-                for line in path.read_text().splitlines():
-                    row = json.loads(line)
-                    key = (row["pattern"], row.get("start"), row.get("end"))
-                    if row["verdict"] != "done" or key in seen:  # the same span is often reached from two places
+            for place in json.loads((out / "places.json").read_text()):
+                for name in place["patterns"]:
+                    if name not in patterns:
+                        continue
+                    path = out / "labels" / f"{name}-{patterns[name]['sha']}" / f"{place['id']}.json"
+                    if not path.exists():
+                        missing += 1
+                        continue
+                    row = json.loads(path.read_text())
+                    key = (name, row.get("start"), row.get("end"))
+                    if not row["label"] or key in seen:  # the same span is often reached from two places
                         continue
                     seen.add(key)
-                    place = index.get(row.get("moment"), {})
                     stream.write(json.dumps(dict(
-                        task=points["task"], trajectory_id=points["trajectory_id"], pattern=row["pattern"], start=row["start"], end=row["end"],
-                        steps=list(range(row["start"], row["end"] + 1)), place=dict(id=row.get("moment"), type=place.get("type"), step=place.get("step")),
-                        answers=row.get("answers"), evidence=row.get("steps"), why=row.get("why"), quote=row.get("quote"),
-                        model=meta.get("model"), sheet_sha256=meta.get("sheet_sha256")), ensure_ascii=False) + "\n")
+                        task=points["task"], trajectory_id=points["trajectory_id"], pattern=name, pattern_sha=row["sha"], start=row["start"], end=row["end"],
+                        steps=list(range(row["start"], row["end"] + 1)), place=dict(id=place["id"], type=place["type"], step=place["step"]),
+                        answers=row["answers"], evidence=row["steps"], why=row.get("why"), quote=row.get("quote"), model=row["meta"]["model"]),
+                        ensure_ascii=False) + "\n")
                     count += 1
-                    per[row["pattern"]] = per.get(row["pattern"], 0) + 1
-    print(f"{count} labelled spans in {len(args.dirs)} rollouts: {dict(sorted(per.items()))}")
+                    per[name] = per.get(name, 0) + 1
+    print(f"{count} labels in {len(args.dirs)} rollouts: {dict(sorted(per.items()))}" + (f"; {missing} questions not answered yet" if missing else ""))
 
 
 def main():
@@ -467,15 +435,12 @@ def main():
     p = sub.add_parser("places")
     p.add_argument("dir")
     p.add_argument("--timeline", nargs="+", default=["timeline.json"], help="reader output files inside DIR; earlier files win")
-    p.add_argument("--batch", type=int, default=1, help="places per request")
     p.set_defaults(run=places)
     p = sub.add_parser("judge")
     p.add_argument("dirs", nargs="+")
-    p.add_argument("--sheet", nargs="+", required=True, help="patterns/label-sheet.md")
     p.add_argument("--url", nargs="+", required=True, help="OpenAI-compatible base URLs ending in /v1")
     p.add_argument("--per-url", type=int, default=1, help="concurrent requests per URL")
-    p.add_argument("--name", required=True, help="output directory inside each DIR")
-    p.add_argument("--packets", default="packets", help="packet directory inside each DIR")
+    p.add_argument("--patterns", nargs="*", help="ask only about these patterns (default: all)")
     p.add_argument("--timeline", default="timeline.json")
     p.add_argument("--window-chars", type=int, default=150000, help="the log is shown as the steps around the place, about this size")
     p.add_argument("--max-tokens", type=int, default=30000)
@@ -486,7 +451,6 @@ def main():
     p.set_defaults(run=judge)
     p = sub.add_parser("labels")
     p.add_argument("dirs", nargs="+")
-    p.add_argument("--name", required=True, help="directory of judge output inside each DIR")
     p.add_argument("--out", required=True)
     p.set_defaults(run=labels)
     args = parser.parse_args()

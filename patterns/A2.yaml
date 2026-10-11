@@ -1,0 +1,20 @@
+name: A2
+title: Use the parts of the judge's answer
+places:
+- result
+questions:
+- id: saw_parts
+  expect: true
+  text: 'the command printed more than a total: results per test or dataset, sub-scores, named failures.'
+- id: planned_before_result
+  expect: false
+  text: the work that follows was already planned or begun before this result.
+- id: part_names_target
+  expect: true
+  text: the agent names one part of the answer, and its next piece of work is on exactly that part.
+steps:
+- id: result_step
+  then: <
+- id: work_step
+  inside: true
+  text: the first step of that work

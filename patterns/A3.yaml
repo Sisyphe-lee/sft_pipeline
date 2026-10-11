@@ -1,0 +1,31 @@
+name: A3
+title: Ask the judge with a probe submission
+places:
+- probe
+- result
+questions:
+- id: judge_only_fact
+  expect: true
+  text: there is an open question that only the judge can answer. A question that a local run, a local server or the files can answer is not one.
+- id: step_on_known_trend
+  expect: false
+  text: the submission is the next step along a trend the judge has already shown (one more value in the same direction).
+- id: question_before
+  expect: true
+  text: the agent says what it wants to learn before it submits.
+- id: answer_used
+  expect: true
+  text: it reads the answer and its next decision follows from it.
+- id: left_on_probe
+  expect: false
+  text: the submitted files stay on the probe version afterwards.
+steps:
+- id: question_step
+  then: <=
+- id: submit_step
+  run: true
+  submit: true
+  inside: true
+  then: <=
+  text: a submit command
+- id: answer_step
