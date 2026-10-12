@@ -429,16 +429,18 @@ def main() -> None:
         print(f"[deterministic] enabled: {', '.join(applied)}")
     if getattr(args, "zero3_init", False):
         validate_zero3_init(deepspeed_config)
+    elif args.resident_parameters.strip():
+        parser.error("--resident-parameters requires --zero3-init")
     if getattr(args, "flashnext_qsa", False):
         if not getattr(args, "zero3_init", False) or args.attn_implementation != "sdpa" or args.lora:
             parser.error("--flashnext-qsa requires --zero3-init, --attn-implementation sdpa and full SFT")
-    if args.resident_parameters.strip() and not getattr(args, "zero3_init", False):
-        parser.error("--resident-parameters requires --zero3-init")
         from transformers import AutoConfig
         if AutoConfig.from_pretrained(args.model).model_type != "qwen4_exp":
             parser.error("--flashnext-qsa is only for Qwen3.8-Flash-Next (qwen4_exp)")
         from training.backends.flashnext.attention import install
         install()
+        if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+            print(json.dumps({"event": "flashnext_qsa_installed"}), flush=True)
     dataset_root, splits = load_manifest(args.data_manifest, args.data_root)
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if args.gradient_accumulation_steps is None:
