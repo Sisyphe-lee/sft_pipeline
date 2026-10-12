@@ -108,6 +108,8 @@ def test_miles_gpu_kernel_forward_backward(length, budget):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='requires authorized CUDA device')
 def test_fla_gpu_kernel_matches_hf_recurrence():
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from training.backends.flashnext.attention import configure_fla_l2norm
+    configure_fla_l2norm()
     torch.manual_seed(31)
     # Actual FlashNext head counts/dimensions after HF repeats the key heads.
     values = [torch.randn(1, 65, 48, 128, dtype=torch.bfloat16) for _ in range(3)]
@@ -125,3 +127,35 @@ def test_fla_gpu_kernel_matches_hf_recurrence():
     expected.backward(grad.float().cpu())
     for x, y in zip(inputs, reference):
         torch.testing.assert_close(x.grad.float().cpu(), y.grad, atol=.04, rtol=.06)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='requires authorized CUDA device')
+def test_long_gpu_kernel_full_context():
+    """Reproduce the failed batch's query length without a quadratic oracle."""
+    from training.backends.flashnext.miles_qsa import qsa_sparse_attention
+    length, budget = 121051, 2048
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    torch.manual_seed(23)
+    # Full budget after the initial causal prefix; no truncation of query rows.
+    offsets = torch.arange(budget, device='cuda', dtype=torch.int32)
+    indices = torch.arange(length, device='cuda', dtype=torch.int32)[:, None] - offsets
+    indices.clamp_(min=-1)
+    inputs = [torch.randn(length, heads, 256, device='cuda', dtype=torch.bfloat16,
+                          requires_grad=True) for heads in [24, 2, 2]]
+    actual = qsa_sparse_attention(*inputs, indices, 1 / math.sqrt(256))
+    # Check queries on both sides of a launch boundary and at the final tail.
+    for row in (2047, 2048, length - 1):
+        selected = indices[row].long()
+        q, k, v = [x.detach().float() for x in
+                   (inputs[0][row:row+1], inputs[1][selected], inputs[2][selected])]
+        scores = torch.einsum('thd,shd->hts', q, k.repeat_interleave(12, 1)) / 16
+        expected = torch.einsum('hts,shd->thd', scores.softmax(-1), v.repeat_interleave(12, 1))
+        torch.testing.assert_close(actual[row:row+1].float(), expected, atol=.025, rtol=.025)
+    actual.backward(torch.ones_like(actual))
+    for value in inputs:
+        assert torch.isfinite(value.grad).all()
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated() / 2**30
+    print(f'QSA_LONG_OK tokens={length} budget={budget} peak_allocated_gib={peak:.2f}', flush=True)
+    assert peak < 32, f'Unexpected kernel tensor memory: {peak:.2f} GiB'

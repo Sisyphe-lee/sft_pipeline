@@ -97,6 +97,22 @@ def sparse_forward(self, hidden_states, position_embeddings, attention_mask=None
     return self.o_proj(output), None
 
 
+def configure_fla_l2norm():
+    """Avoid memory-heavy autotune candidates during long-context backward.
+
+    Only called by the opt-in FlashNext adapter. FLA's math and tensor layouts
+    stay unchanged; these per-process kernel objects never modify installed files.
+    """
+    import importlib
+    import triton
+
+    norm = importlib.import_module('fla.modules.l2norm')
+    for name in ('l2norm_fwd_kernel', 'l2norm_bwd_kernel'):
+        kernel = getattr(norm, name)
+        kernel.configs = [triton.Config({'BT': 32}, num_warps=4)]
+        kernel.cache.clear()
+
+
 def install():
     import transformers
     from transformers.models.qwen4_exp import modeling_qwen4_exp as hf
@@ -105,6 +121,7 @@ def install():
     if transformers.__version__ != "5.16.0":
         raise RuntimeError("FlashNext attention adapter currently requires transformers==5.16.0")
     # These symbols belong only to Qwen4Exp; other HF architectures are untouched.
+    configure_fla_l2norm()
     hf.create_causal_mask = training_mask
     hf.Qwen4ExpTextAttention.forward = sparse_forward
     # HF's existing fallback dispatcher resolves the local FLA package. Require

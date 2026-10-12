@@ -1,4 +1,4 @@
-# Vendored unchanged from radixark/miles at 05bd9cb2afc9f6a1e94544e8fb4e9918771e763b
+# Adapted from radixark/miles at 05bd9cb2afc9f6a1e94544e8fb4e9918771e763b
 # Source: miles/kernels/attention/qsa/sparse_attention.py
 # Apache-2.0; see MILES_LICENSE.
 """Triton QSA sparse attention for training: forward + backward.
@@ -12,6 +12,11 @@ import triton
 import triton.language as tl
 
 from torch import Tensor
+
+
+# Bound launch scratch as well as per-program register pressure. Queries retain
+# access to all selected keys; chunking does not shorten the context.
+QUERY_CHUNK = 2048
 
 
 @triton.jit(do_not_specialize=["T", "TOPK"])
@@ -33,6 +38,7 @@ def _qsa_fwd_kernel(
     stride_oh,
     T,
     TOPK,
+    QUERY_START,
     scale,
     GROUP: tl.constexpr,  # query heads per kv head
     D: tl.constexpr,
@@ -43,7 +49,7 @@ def _qsa_fwd_kernel(
     pid_h = tl.program_id(1)  # query head index
     kv_head = pid_h // GROUP
 
-    offs_q = pid_t * BQ + tl.arange(0, BQ)
+    offs_q = QUERY_START + pid_t * BQ + tl.arange(0, BQ)
     offs_d = tl.arange(0, D)
     q_mask = offs_q < T
 
@@ -126,6 +132,7 @@ def _qsa_bwd_kernel(
     stride_oh,
     T,
     TOPK,
+    QUERY_START,
     scale,
     GROUP: tl.constexpr,
     D: tl.constexpr,
@@ -136,7 +143,7 @@ def _qsa_bwd_kernel(
     pid_h = tl.program_id(1)
     kv_head = pid_h // GROUP
 
-    offs_q = pid_t * BQ + tl.arange(0, BQ)
+    offs_q = QUERY_START + pid_t * BQ + tl.arange(0, BQ)
     offs_d = tl.arange(0, D)
     q_mask = offs_q < T
 
@@ -205,32 +212,34 @@ class _QSASparseAttn(torch.autograd.Function):
         idx = indices.contiguous()
         o = torch.empty(T, Hq, D, device=q.device, dtype=torch.float32)
         lse = torch.empty(Hq, T, device=q.device, dtype=torch.float32)
-        BQ, BK = 32, 64
-        grid = (triton.cdiv(T, BQ), Hq)
-        _qsa_fwd_kernel[grid](
-            qc,
-            kc,
-            vc,
-            idx,
-            o,
-            lse,
-            qc.stride(0),
-            qc.stride(1),
-            kc.stride(0),
-            kc.stride(1),
-            vc.stride(0),
-            vc.stride(1),
-            idx.stride(0),
-            o.stride(0),
-            o.stride(1),
-            T,
-            topk,
-            scale,
-            GROUP=group,
-            D=D,
-            BQ=BQ,
-            BK=BK,
-        )
+        BQ, BK = 4, 32
+        for query_start in range(0, T, QUERY_CHUNK):
+            grid = (triton.cdiv(min(QUERY_CHUNK, T - query_start), BQ), Hq)
+            _qsa_fwd_kernel[grid](
+                qc,
+                kc,
+                vc,
+                idx,
+                o,
+                lse,
+                qc.stride(0),
+                qc.stride(1),
+                kc.stride(0),
+                kc.stride(1),
+                vc.stride(0),
+                vc.stride(1),
+                idx.stride(0),
+                o.stride(0),
+                o.stride(1),
+                T,
+                topk,
+                query_start,
+                scale,
+                GROUP=group,
+                D=D,
+                BQ=BQ,
+                BK=BK,
+            )
         ctx.save_for_backward(qc, kc, vc, idx, o, lse)
         ctx.scale = scale
         ctx.group = group
@@ -245,36 +254,38 @@ class _QSASparseAttn(torch.autograd.Function):
         dq = torch.empty(T, Hq, D, device=qc.device, dtype=torch.float32)
         dk = torch.zeros(kc.shape, device=kc.device, dtype=torch.float32)
         dv = torch.zeros(vc.shape, device=vc.device, dtype=torch.float32)
-        BQ, BK = 32, 64
-        grid = (triton.cdiv(T, BQ), Hq)
-        _qsa_bwd_kernel[grid](
-            qc,
-            kc,
-            vc,
-            idx,
-            o,
-            lse,
-            do,
-            dq,
-            dk,
-            dv,
-            qc.stride(0),
-            qc.stride(1),
-            kc.stride(0),
-            kc.stride(1),
-            vc.stride(0),
-            vc.stride(1),
-            idx.stride(0),
-            do.stride(0),
-            do.stride(1),
-            T,
-            topk,
-            ctx.scale,
-            GROUP=ctx.group,
-            D=D,
-            BQ=BQ,
-            BK=BK,
-        )
+        BQ, BK = 4, 32
+        for query_start in range(0, T, QUERY_CHUNK):
+            grid = (triton.cdiv(min(QUERY_CHUNK, T - query_start), BQ), Hq)
+            _qsa_bwd_kernel[grid](
+                qc,
+                kc,
+                vc,
+                idx,
+                o,
+                lse,
+                do,
+                dq,
+                dk,
+                dv,
+                qc.stride(0),
+                qc.stride(1),
+                kc.stride(0),
+                kc.stride(1),
+                vc.stride(0),
+                vc.stride(1),
+                idx.stride(0),
+                do.stride(0),
+                do.stride(1),
+                T,
+                topk,
+                query_start,
+                ctx.scale,
+                GROUP=ctx.group,
+                D=D,
+                BQ=BQ,
+                BK=BK,
+            )
         return dq.to(qc.dtype), dk.to(kc.dtype), dv.to(vc.dtype), None, None
 
 
