@@ -1,8 +1,8 @@
 # 调试配方,不是正式训练:单机 8 卡走通 FlashNext 的训练路径并量显存。
 #
 # 正式训练是全参(见 qwen38_flashnext_sft_experimental.yaml)。全参的优化器状态 8 卡装不下:
-# 177B 参数的 fp32 主权重和 Adam 两个状态约 2.1 TB,8 张 275 GiB 的卡共 2.2 TB,还要放 bf16 权重、
-# 梯度和激活。这里把占大头的 MoE 专家(121B)和 n-gram embedding(51B)冻结,只训其余约 5B,
+# 126B 可训练参数的 fp32 主权重和 Adam 两个状态约 1.5 TB,8 张 275 GiB 的卡共 2.2 TB,还要放 bf16 权重、
+# 每卡一整份 n-gram embedding(95 GiB)、梯度和激活。这里把占大头的 MoE 专家(121B)也冻结,只训其余约 5B,
 # 加载、ZeRO-3 分片、稀疏注意力、GDN、collate、loss 走的都是正式训练的同一条代码路径。
 #
 # 和正式配方的差别只有:freeze_parameters、global_batch_size 32 -> 8(8 卡,梯度累积 1)、
@@ -16,7 +16,8 @@ global_batch_size: 8
 max_input_tokens: 196608
 truncate_history: false
 freeze_vision: true
-freeze_parameters: mlp.experts,ple.ple_embedding
+freeze_parameters: mlp.experts
+resident_parameters: ple.ple_embedding.ngram_embedding.weight
 lora: false
 gradient_checkpointing: true
 attn_implementation: sdpa

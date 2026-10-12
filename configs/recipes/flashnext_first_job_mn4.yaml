@@ -1,0 +1,31 @@
+# 第一个 32 卡 Job 用:验证全参配置(4 node × 8 B300)能训起来并存下模型,不是正式实验。
+# 和 qwen38_flashnext_sft_experimental.yaml 的差别只有:跑 1 个 epoch、不开 W&B、
+# 中途不存 checkpoint(带优化器状态的 checkpoint 约 1.9 TB),只在结束时存一份模型(354 GB)。
+learning_rate: 1.0e-5
+warmup_ratio: 0.0
+max_grad_norm: 1.0
+num_train_epochs: 1.0
+max_steps: -1
+global_batch_size: 32
+max_input_tokens: 196608
+truncate_history: false
+freeze_vision: true
+resident_parameters: ple.ple_embedding.ngram_embedding.weight
+lora: false
+gradient_checkpointing: true
+attn_implementation: sdpa
+zero3_init: true
+flashnext_qsa: true
+deepspeed: ../training/qwen3_5_sft_zero3_noovl.json
+sampling_strategy: length_grouped
+loss_normalization: turn_mean
+seed: 3407
+validation: false
+report_to: none
+logging_steps: 1
+save_strategy: steps
+save_steps: 100000
+save_total_limit: 1
+dataloader_num_workers: 0
+deterministic: false
+hard_exit_after_train: true

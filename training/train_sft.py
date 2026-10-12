@@ -21,7 +21,7 @@ from data_pipeline.manifest import check_split_groups, load_manifest, sha256
 from training.recipe import build_run_record, parse_recipe, record_run, validate_resume_run
 from training.sampling import EpisodeSampler, LengthGroupedSampler
 from training.lora_support import lora_vision_exclusions
-from training.model_loading import parameter_numel, validate_zero3_init
+from training.model_loading import hold_whole, parameter_numel, validate_zero3_init
 from training.jsonl_input import load_jsonl_input
 from training.qwen35_preflight import (
     load_verified_processor,
@@ -257,6 +257,12 @@ def build_parser():
              "优化器状态时,冻结占大头的参数(如 mlp.experts,ple.ple_embedding)走同一条代码路径、量显存。"
              "正式训练是全参,留空。",
     )
+    parser.add_argument(
+        "--resident-parameters", default="",
+        help="逗号分隔的参数名片段:这些参数冻结,并且不交给 ZeRO-3 分片,加载后在每张卡上各留一整份"
+             "(training/model_loading.py 的 hold_whole)。给 FlashNext 的 n-gram embedding 用:它是一整张 "
+             "51.2B 的表,ZeRO-3 每步都要把它整张聚合到每张卡上。需要 --zero3-init。",
+    )
     # ---- LoRA(默认关。开着才走 peft,关着的代码路径与全量 finetune 逐字节相同)
     parser.add_argument(
         "--lora",
@@ -426,6 +432,8 @@ def main() -> None:
     if getattr(args, "flashnext_qsa", False):
         if not getattr(args, "zero3_init", False) or args.attn_implementation != "sdpa" or args.lora:
             parser.error("--flashnext-qsa requires --zero3-init, --attn-implementation sdpa and full SFT")
+    if args.resident_parameters.strip() and not getattr(args, "zero3_init", False):
+        parser.error("--resident-parameters requires --zero3-init")
         from transformers import AutoConfig
         if AutoConfig.from_pretrained(args.model).model_type != "qwen4_exp":
             parser.error("--flashnext-qsa is only for Qwen3.8-Flash-Next (qwen4_exp)")
@@ -661,13 +669,14 @@ def main() -> None:
             )
     frozen_by_name = 0
     freeze_parts = [part.strip() for part in args.freeze_parameters.split(",") if part.strip()]
-    if freeze_parts:
+    resident_parts = [part.strip() for part in args.resident_parameters.split(",") if part.strip()]
+    if freeze_parts or resident_parts:
         for name, parameter in model.named_parameters():
-            if parameter.requires_grad and any(part in name for part in freeze_parts):
+            if parameter.requires_grad and any(part in name for part in freeze_parts + resident_parts):
                 parameter.requires_grad = False
                 frozen_by_name += parameter_numel(parameter)
         if frozen_by_name == 0:
-            raise ValueError("--freeze-parameters matched no trainable parameters")
+            raise ValueError("--freeze-parameters / --resident-parameters matched no trainable parameters")
     lora_summary: dict[str, object] = {}
     if args.lora:
         from peft import LoraConfig, get_peft_model
@@ -738,6 +747,14 @@ def main() -> None:
             ),
             flush=True,
         )
+
+    if resident_parts:
+        # Before the trainer allocates the optimizer state: the one gather needs two copies of each tensor.
+        held = hold_whole(model, resident_parts)
+        if held == 0:
+            raise ValueError("--resident-parameters matched no parameters")
+        if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+            print(json.dumps({"event": "resident_parameters", "elements": held, "fragments": resident_parts}), flush=True)
 
     if config is None:
         config = make_config()
