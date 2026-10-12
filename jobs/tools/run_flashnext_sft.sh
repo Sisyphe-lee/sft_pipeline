@@ -7,7 +7,7 @@ done
 export REPO=$PWD
 test "$(git rev-parse HEAD)" = "$CODE_COMMIT"
 test -z "$(git status --porcelain --untracked-files=no)"
-export RECIPE=$REPO/configs/recipes/qwen38_flashnext_sft_experimental.yaml
+export RECIPE=$REPO/configs/recipes/${RECIPE_FILE:-qwen38_flashnext_sft_experimental.yaml}
 export EXPECTED_MODEL_TYPE=qwen4_exp
 export PY=${PY:-/usr/bin/python3}
 export PYTHONPATH=$SFT_HF_OVERLAY:$SFT_STACK_ROOT/qwen35-fla:$SFT_STACK_ROOT/qwen35-train:$REPO
