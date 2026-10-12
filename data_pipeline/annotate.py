@@ -35,7 +35,10 @@ def load_config(path):
     given = yaml.safe_load(Path(path).read_text()) or {}
     if given.keys() - DEFAULTS.keys():
         raise ValueError(f"unknown config keys: {sorted(given.keys() - DEFAULTS.keys())}")
-    return dict(DEFAULTS, **given)
+    lab = dict(DEFAULTS, **given)
+    if lab["read_request"].keys() - set(lab["readings"]):
+        raise ValueError(f"read_request names readings that are not in `readings`: {sorted(lab['read_request'].keys() - set(lab['readings']))}")
+    return lab
 
 
 def kimi_urls():
@@ -97,7 +100,7 @@ def main():
                 d, name = todo.pop(0)
             try:
                 label.read(argparse.Namespace(dir=str(d), protocol=str(REPO / f"patterns/{name}-protocol.md"), url=url, name=name,
-                                              max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra=json.dumps(lab["read_request"]),
+                                              max_tokens=lab["read_max_tokens"], temperature=0.0, timeout=3600, tries=3, extra=json.dumps(lab["read_request"].get(name, {})),
                                               force=False, segment_chars=SEGMENT_CHARS, context=f"{first}.json" if name != first and d in parted else None))
             except BaseException as error:  # noqa: BLE001 - a thread must not die silently; report and stop the run
                 failed.append(f"{d.name} {name}: {type(error).__name__} {error}")
@@ -112,9 +115,8 @@ def main():
         t.join()
     if failed:
         sys.exit("reading failed: " + "; ".join(failed))
-    for d in dirs:
-        if not (d / "places.json").exists():
-            label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in later + [first]]))
+    for d in dirs:  # made anew every time: a reading added to the config since the last run brings its places in
+        label.places(argparse.Namespace(dir=str(d), timeline=[f"{n}.json" for n in later + [first]]))
     # 5. label: neighbouring places and their patterns in one request; only what the current pattern files have not been asked yet
     label.judge(argparse.Namespace(dirs=[str(d) for d in dirs], url=urls, per_url=lab["per_url"], patterns=lab["patterns"], together=lab["together"],
                                    timeline=f"{lab['readings'][0]}.json", window_chars=lab["window_chars"],

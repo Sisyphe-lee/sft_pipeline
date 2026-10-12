@@ -12,7 +12,7 @@ REPO = Path(__file__).parents[1]
 
 
 class Model(BaseHTTPRequestHandler):
-    asked = []
+    asked, read = [], []
 
     def log_message(self, *args):
         pass
@@ -42,7 +42,11 @@ class Model(BaseHTTPRequestHandler):
                                             "changed_before_check": False, "finding_from_check": True, "next_follows": True},
                                    steps={"result_step": 2, "check_step": 3, "finding_step": 4})
                     answer["results"].append(row)
-        else:  # a reading: report one unexpected result at step 2
+        elif "Ideas-and-records" in sent["messages"][0]["content"]:  # the reading for ideas: one idea set aside at step 3
+            Model.read.append(("ideas", sent.get("reasoning_effort")))
+            answer = {"moments": [{"type": "set_aside", "step": 3, "steps": [3, 4], "what": "later"}]}
+        else:  # any other reading: report one unexpected result at step 2
+            Model.read.append(("other", sent.get("reasoning_effort")))
             answer = {"phases": [], "directions": [], "moments": [{"type": "unexpected", "step": 2, "steps": [2, 4], "what": "worse"}]}
         self.reply({"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(answer)}}], "usage": {}})
 
@@ -107,6 +111,29 @@ def test_annotate_then_select(tmp_path):
         manifest = json.loads(out.read_text())
         assert [r["source_line"] for r in manifest["train"]] == turns and manifest["train"][0]["estimated_tokens"] == 100
     assert manifest["selection"]["unusable"] == {"trainer cannot use it: template: x": 1, "longer than max_tokens": 1}
+    server.shutdown()
+
+
+def test_a_reading_and_patterns_added_later(tmp_path):
+    """Label a few patterns from one reading first; the other reading and the other patterns later ask only what is new."""
+    capture(tmp_path / "capture", 5)
+    server = HTTPServer(("127.0.0.1", 0), Model)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env = {"KIMI_URLS": f"http://127.0.0.1:{server.server_port}/v1", "PATH": "/usr/bin:/bin"}
+
+    def annotate(name, text):
+        (tmp_path / name).write_text(text)
+        done = subprocess.run([sys.executable, str(REPO / "data_pipeline/annotate.py"), "--config", str(tmp_path / name), "--capture", str(tmp_path / "capture"),
+                               "--runs", str(tmp_path / "runs"), "--data", str(tmp_path / "data")], env=env, capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        return [(x["pattern"], x["steps"]) for x in map(json.loads, (tmp_path / "data/labels.jsonl").read_text().splitlines())]
+
+    Model.asked, Model.read = [], []
+    assert annotate("few.yaml", "readings: [timeline]\npatterns: [C1]\n") == [("C1", [3, 4])]
+    assert Model.read == [("other", None)] and Model.asked == ["C1"]
+    annotate("all.yaml", "readings: [timeline, ideas]\nread_request: {ideas: {reasoning_effort: low}}\n")
+    assert Model.read == [("other", None), ("ideas", "low")]  # the first reading is not made again; the new one gets its own request setting
+    assert Model.asked.count("C1") == 1 and "D2" in Model.asked  # D2 is asked where the new reading saw an idea set aside
     server.shutdown()
 
 

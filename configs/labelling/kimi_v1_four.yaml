@@ -1,0 +1,7 @@
+# 只标抽查下来可靠的 4 个 pattern（A1、A4、D4、L1），只读 timeline 一遍：一条 4 小时的 rollout 约 10 并发位分钟。
+# 其余 pattern 以后要用时，对同一个数据目录换回 kimi_v1.yaml 重跑即可：只补另外两遍通读和没问过的问题。
+patterns: [A1, A4, D4, L1]
+readings: [timeline]
+per_url: 2
+together: 8
+judge_request: {reasoning_effort: low}

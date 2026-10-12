@@ -31,8 +31,14 @@
 - Labelling time is Kimi's output tokens, almost all reasoning (about 100 tokens a second per request), not the
   number of requests; measure it in slot-minutes from `work/<rollout>/requests/`. Measured on 2026-10-12: grouping
   saves 2.4x, `reasoning_effort: low` another 3x (Kimi takes only low, high and max; none switches thinking off).
-  Telling the model to stop at the first contrary answer does not shorten its reasoning. Readings at low effort
-  report a third fewer places. B1 needs high effort. Check any further speed-up against stored answers of the same
+  Telling the model to stop at the first contrary answer does not shorten its reasoning. B1 needs high effort.
+  A reading at default effort reasons for 20-60K tokens whatever the log's length, sometimes past `read_max_tokens`
+  (the attempt is then lost and made again); at low effort it is 4-5 times faster and reports a third to a half
+  fewer places. So each reading has its own request setting (`read_request` in the labelling config): `timeline`
+  stays at the default because D4, C2, A3 and B1 depend on it alone, `ideas` and `surprises` (places for C1, D2, D3
+  only) run at low. Fewer places means fewer labels, not wrong ones. A config may also name fewer patterns and
+  readings; running a fuller config on the same data directory later asks only what is missing
+  (`configs/labelling/kimi_v1_four.yaml`). Check any further speed-up against stored answers of the same
   questions, and against the same setting asked twice: two runs of one setting already differ in about a fifth of
   the labels, and a label only one run gives is wrong about twice as often as one both give.
 - Pattern and sheet texts contain no task detail. Held-out tasks are not used for labelling data, training or tuning.
