@@ -176,6 +176,40 @@ Kimi 地址从环境变量 `KIMI_URLS`（空格分隔，以 `/v1` 结尾）读�
 
 第一轮训练建议只用 A1、A4、L1 和 D4（策略文件里写 `patterns: [A1, A4, D4, L1]`，对照组写同样的列表）；D4 只占这四个标签的 7%，去留影响不大。
 
-**训练**：`training/`、`jobs/`、`configs/recipes`、`configs/training` 是从
-physicalagent-sft-pipeline（分支 `feat/flashnext-sft`，提交 `dc7854c`）复制的，只把读数据和 collate 这一段接通并验证了；
-模型加载和训练循环还没在本仓库跑过。还没做：按最终成绩筛选 rollout、验证集划分。
+**训练**（学生模型 Qwen3.8-Flash-Next，177B 参数；代码从 physicalagent-sft-pipeline 分支 `feat/flashnext-sft` 复制后改过）：
+
+2026-10-12 第一次训起来。单机 8 卡（WebIDE）和 32 卡 Job（4 节点 × 8 B300，Job 345586471）都跑通了第一步，
+数据是开发用的 1 条 rollout（112 行，1.1 万–5 万 token）。
+
+    # WebIDE 上 8 卡调试（冻结 MoE 专家，只为走通路径和量显存）
+    source jobs/tools/ide_env.sh
+    PRINT_PEAK_MEM=1 python3 -m torch.distributed.run --standalone --nproc_per_node=8 training/train_sft.py \
+        --recipe configs/recipes/flashnext_debug_8gpu.yaml --model <模型目录> --data-manifest <清单>.json --output <新目录>
+
+    # 32 卡 Job：生成配置（代码要先提交并 push），dry-run 后提交
+    python3 jobs/tools/make_flashnext_job.py --recipe <recipe 文件名> --model ... --manifest ... --manifest-sha ... \
+        --data-root ... --output ... --logs ... --run-name ... --stack-root ... --hf-overlay ... --job-file jobs/generated/<名字>.yml
+    LAUNCH_CONTAINER_MODE=dev_container robbyctl submit --dry-run jobs/generated/<名字>.yml
+
+| recipe | 用途 |
+|---|---|
+| `qwen38_flashnext_sft_experimental.yaml` | 正式训练：32 卡，5 个 epoch |
+| `flashnext_first_job_mn4.yaml` | 验证 32 卡能训起来：1 个 epoch，只在结束时存一份模型 |
+| `flashnext_debug_8gpu.yaml` | 单机 8 卡调试：冻结 MoE 专家，跑 3 步 |
+
+训练的是除两块之外的全部参数（125.7B，占 70.9%）：视觉塔冻结；n-gram embedding 冻结并放在主机内存里
+（recipe 的 `resident_parameters`）。后者是一整张 51.2B 的表（bf16 下 95 GiB），ZeRO-3 每步都要把它整张聚合到
+每张卡上，之前三次 32 卡 Job 第一步就 OOM 是这个原因。
+
+实测显存（每卡，GiB，B300 共 268）：
+
+| | 加载后常驻 | 一步的峰值 |
+|---|---|---|
+| 8 卡，冻结专家，4.5–5 万 token | 32.8 | 118–126 |
+| 32 卡，全部专家训练，3.6–5 万 token，第 1 步 | 29.3（Adam 状态第一步后才分配，再加约 29） | 122 |
+
+激活约占 85–93 GiB（5 万 token），随长度增加（每千 token 约 1.7 GiB，只有 4.2–5 万两档数据）。照这个比例
+196608 的上限装不下，哪一段代码占的还没查。8 卡装不下全参的优化器状态，全参只能用 Job。
+
+还没做：长于 5 万 token 的行；训练出的模型能否被评测用的推理服务加载；按最终成绩筛选 rollout、验证集划分；
+`training/` 里 4 个测试文件和 1 个测试用例依赖原仓库的选数据模块，在这里跑不了。
