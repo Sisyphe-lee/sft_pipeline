@@ -48,9 +48,13 @@ manifest=json.load(open(os.environ['DM']))
 root=os.environ.get('DATA_ROOT') or os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(os.environ['DM'])),manifest['base_root']))
 first=os.path.join(root,manifest['sources'][0])
 row=json.loads(open(first).readline())
+if not row.get('images'):
+    # 本项目的行是纯文本(images: []),读得到首行就够了
+    print('preflight: 首行可读,没有图片',first)
+    sys.exit(0 if row.get('prompt') and row.get('completion') else 9)
 img=os.path.join(os.path.dirname(first),row['images'][0])
 print('preflight: 首图',img)
-sys.exit(0 if os.path.isfile(img) else 9)" || fail "首图不可见"
+sys.exit(0 if os.path.isfile(img) else 9)" || fail "清单的首个源文件读不到,或首图不可见"
 
 # --- 配方与基座 ---
 ls "$RECIPE" >/dev/null 2>&1 || fail "recipe 不存在 $RECIPE"

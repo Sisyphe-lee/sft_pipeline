@@ -152,6 +152,7 @@ class FiniteSFTTrainer(SFTTrainer):
         if os.environ.get("PRINT_PEAK_MEM") == "1" and torch.cuda.is_available():
             print(json.dumps({
                 "event": "peak_memory", "global_step": int(self.state.global_step),
+                "rank": dist.get_rank() if dist.is_available() and dist.is_initialized() else 0,
                 "sequence_length": sequence_length, "supervised_tokens": supervised_tokens,
                 "max_allocated_gb": round(torch.cuda.max_memory_allocated() / 2**30, 1),
                 "max_reserved_gb": round(torch.cuda.max_memory_reserved() / 2**30, 1),
@@ -249,6 +250,12 @@ def build_parser():
         "--freeze-vision",
         action=argparse.BooleanOptionalAction,
         default=True,
+    )
+    parser.add_argument(
+        "--freeze-parameters", default="",
+        help="逗号分隔的参数名片段,名字里含任一片段的参数不训练。只用于调试:卡数装不下全参训练的"
+             "优化器状态时,冻结占大头的参数(如 mlp.experts,ple.ple_embedding)走同一条代码路径、量显存。"
+             "正式训练是全参,留空。",
     )
     # ---- LoRA(默认关。开着才走 peft,关着的代码路径与全量 finetune 逐字节相同)
     parser.add_argument(
@@ -652,6 +659,15 @@ def main() -> None:
             raise ValueError(
                 "--freeze-vision matched no vision/visual/aligner parameters"
             )
+    frozen_by_name = 0
+    freeze_parts = [part.strip() for part in args.freeze_parameters.split(",") if part.strip()]
+    if freeze_parts:
+        for name, parameter in model.named_parameters():
+            if parameter.requires_grad and any(part in name for part in freeze_parts):
+                parameter.requires_grad = False
+                frozen_by_name += parameter_numel(parameter)
+        if frozen_by_name == 0:
+            raise ValueError("--freeze-parameters matched no trainable parameters")
     lora_summary: dict[str, object] = {}
     if args.lora:
         from peft import LoraConfig, get_peft_model
@@ -711,6 +727,7 @@ def main() -> None:
                 {
                     "total_parameters": total_parameters,
                     "frozen_vision_parameters": frozen,
+                    "frozen_by_name_parameters": frozen_by_name,
                     "trainable_parameters": trainable_parameters,
                     "trainable_percent": round(
                         100.0 * trainable_parameters / total_parameters, 4
@@ -754,6 +771,10 @@ def main() -> None:
                     print(f"PARAM_CLEAN step={state.global_step}", flush=True)
 
         diag_callbacks.append(ParamScanCallback())
+    if os.environ.get("PRINT_PEAK_MEM") == "1":
+        from training.peak_memory import PeakMemoryCallback
+
+        diag_callbacks.append(PeakMemoryCallback())
 
     oss_callback = make_oss_callback(args)
     oss_callbacks = [oss_callback] if oss_callback is not None else []

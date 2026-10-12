@@ -1,0 +1,37 @@
+# 调试配方,不是正式训练:单机 8 卡走通 FlashNext 的训练路径并量显存。
+#
+# 正式训练是全参(见 qwen38_flashnext_sft_experimental.yaml)。全参的优化器状态 8 卡装不下:
+# 177B 参数的 fp32 主权重和 Adam 两个状态约 2.1 TB,8 张 275 GiB 的卡共 2.2 TB,还要放 bf16 权重、
+# 梯度和激活。这里把占大头的 MoE 专家(121B)和 n-gram embedding(51B)冻结,只训其余约 5B,
+# 加载、ZeRO-3 分片、稀疏注意力、GDN、collate、loss 走的都是正式训练的同一条代码路径。
+#
+# 和正式配方的差别只有:freeze_parameters、global_batch_size 32 -> 8(8 卡,梯度累积 1)、
+# 只跑 max_steps 步、不开 W&B。起的时候加 PRINT_PEAK_MEM=1 打印每步每卡的显存峰值。
+learning_rate: 1.0e-5
+warmup_ratio: 0.0
+max_grad_norm: 1.0
+num_train_epochs: 1.0
+max_steps: 3
+global_batch_size: 8
+max_input_tokens: 196608
+truncate_history: false
+freeze_vision: true
+freeze_parameters: mlp.experts,ple.ple_embedding
+lora: false
+gradient_checkpointing: true
+attn_implementation: sdpa
+zero3_init: true
+flashnext_qsa: true
+deepspeed: ../training/qwen3_5_sft_zero3_noovl.json
+sampling_strategy: length_grouped
+loss_normalization: turn_mean
+seed: 3407
+validation: false
+report_to: none
+logging_steps: 1
+save_strategy: steps
+save_steps: 1000
+save_total_limit: 1
+dataloader_num_workers: 0
+deterministic: false
+hard_exit_after_train: true

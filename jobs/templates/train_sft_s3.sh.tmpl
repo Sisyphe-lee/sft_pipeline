@@ -61,9 +61,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export FLASH_ATTENTION_DETERMINISTIC=1
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 /usr/bin/python3 -c "import oss2, wandb" 2>/dev/null || pip install -q oss2 wandb
-# W&B:照 hjy 的六行,key 明文(用户拍板)。
+# W&B:照 hjy 的六行,key 由生成时的环境变量注入(和 pod 模板一样),不写在仓库里。
 unset WANDB_DISABLED WANDB_SILENT
-export WANDB_API_KEY=local-aa75c945a903cde880b6623cd9cef7fa2191839a
+export WANDB_API_KEY=@WANDB_API_KEY@
 export WANDB_BASE_URL=http://33.180.4.104
 export WANDB_ENTITY=@WANDB_ENTITY@
 export WANDB_PROJECT=@WANDB_PROJECT@

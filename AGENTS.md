@@ -46,8 +46,10 @@
   skipping finished packets, and record the model and the sheet's SHA-256 with each answer.
 - Kimi addresses come from `/personal/kimi.env`; the endpoints are shared, keep to the concurrency the user gives
   (2 requests per address as of 2026-10-12). Check `http://<host>:30000/get_load` before a large run.
-- Remote work: the cluster has no internet. This repository has no remote yet: it reaches the cluster as a tar
-  through OSS (EdgeBench `scripts/transfer_via_oss.py`), other files likewise. Jobs longer than a
+- Remote work: the cluster has no internet. Code reaches it through git: push to
+  `git@code.alipay.com:lcy554440/sft_pipeline.git` and `git pull --ff-only` on the cluster; the work is on `main`
+  (the remote's `master` holds only the files the site generated). Other files go through OSS
+  (EdgeBench `scripts/transfer_via_oss.py`). Jobs longer than a
   minute run in tmux with logs on disk. A waiting loop on a tmux session must use the exact name
   (`tmux has-session -t =name`; `send-keys` needs `-t '=name:'`); a bare name also matches longer names. `grep`
   between a job and its log file buffers the output: use `grep --line-buffered`.
@@ -55,4 +57,6 @@
   that keys on them must also key on the rollout.
 - `training/` follows the conventions of physicalagent-sft-pipeline (policy, manifest and recipe are separate; model,
   data root and output paths are given on the command line). Keep it minimal: no image or robot-task code.
+- Training is full-parameter fine-tuning (the user's requirement, 2026-10-11); no LoRA or partial training as the
+  result. `freeze_parameters` exists only to debug and measure on fewer GPUs than the full optimizer state needs.
 - Data, weights, outputs and generated job files are not committed.
