@@ -46,7 +46,8 @@ def main():
     config = dict(
         k8s_app_name='robbys7', k8s_priority='high', gpu_type='b300', node_num=4,
         communication_network_card='eth0', gpu_per_node=8, cpu_per_gpu=12,
-        memory_per_gpu='140G', disk_memory='200G', shared_memory='100G',
+        memory_per_gpu='140G', disk_memory='200G',
+        shared_memory='200G',  # holds the 103 GB n-gram embedding that the ranks of a node share
         data_stores=dict(store0=dict(mount_point='/robby/share/s7',
                                     store_name='et210-aidc-robby-cpfs', sub_path='/')),
         repo_url='https://code.alipay.com/lcy554440/sft_pipeline',

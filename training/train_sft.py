@@ -259,9 +259,9 @@ def build_parser():
     )
     parser.add_argument(
         "--resident-parameters", default="",
-        help="逗号分隔的参数名片段:这些参数冻结,并且不交给 ZeRO-3 分片,加载后在每张卡上各留一整份"
-             "(training/model_loading.py 的 hold_whole)。给 FlashNext 的 n-gram embedding 用:它是一整张 "
-             "51.2B 的表,ZeRO-3 每步都要把它整张聚合到每张卡上。需要 --zero3-init。",
+        help="逗号分隔的参数名片段:这些参数冻结,并且不交给 ZeRO-3 分片,加载后整张放在主机内存里,"
+             "同一节点的进程共用一份(training/model_loading.py 的 hold_whole)。给 FlashNext 的 n-gram "
+             "embedding 用:它是一整张 51.2B 的表,ZeRO-3 每步都要把它整张聚合到每张卡上。需要 --zero3-init。",
     )
     # ---- LoRA(默认关。开着才走 peft,关着的代码路径与全量 finetune 逐字节相同)
     parser.add_argument(
@@ -751,7 +751,7 @@ def main() -> None:
         )
 
     if resident_parts:
-        # Before the trainer allocates the optimizer state: the one gather needs two copies of each tensor.
+        # Before the trainer allocates the optimizer state: the one gather puts each tensor whole on every GPU.
         held = hold_whole(model, resident_parts)
         if held == 0:
             raise ValueError("--resident-parameters matched no parameters")

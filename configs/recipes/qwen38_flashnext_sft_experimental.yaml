@@ -9,7 +9,7 @@ global_batch_size: 32
 max_input_tokens: 196608
 truncate_history: false
 freeze_vision: true
-# n-gram embedding(一整张 51.2B 的表,bf16 下 95 GiB)冻结,每张卡各留一整份,不交给 ZeRO-3:
+# n-gram embedding(一整张 51.2B 的表,bf16 下 95 GiB)冻结,整张放在主机内存里(每个节点一份),不交给 ZeRO-3:
 # ZeRO-3 每步都要把它整张聚合到每张卡上(聚合时两份),卡数再多也装不下。其余 126B 全部训练。
 resident_parameters: ple.ple_embedding.ngram_embedding.weight
 lora: false

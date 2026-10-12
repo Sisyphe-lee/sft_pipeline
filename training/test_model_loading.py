@@ -26,17 +26,18 @@ def test_global_parameter_count_works_before_gather():
     assert parameter_numel(SimpleNamespace(numel=lambda: 1024)) == 1024
 
 
-def test_held_parameter_becomes_a_frozen_buffer_under_the_same_key():
+def test_held_parameter_becomes_a_frozen_buffer_under_the_same_key(tmp_path):
     import torch
 
     from training.model_loading import hold_whole
 
     model = torch.nn.Sequential(torch.nn.Embedding(7, 3), torch.nn.Linear(3, 2))
     before = {key: value.clone() for key, value in model.state_dict().items()}
-    assert hold_whole(model, ["0.weight"]) == 21
+    assert hold_whole(model, ["0.weight"], shared_dir=str(tmp_path)) == 21
+    assert not list(tmp_path.iterdir())  # the shared file is unlinked once mapped
     assert [name for name, _ in model.named_parameters()] == ["1.weight", "1.bias"]
     assert list(model.state_dict()) == list(before)
     assert torch.equal(model.state_dict()["0.weight"], before["0.weight"])
     model(torch.tensor([1, 6])).sum().backward()
     assert not model[0].weight.requires_grad
-    assert hold_whole(model, ["no such parameter"]) == 0
+    assert hold_whole(model, ["no such parameter"], shared_dir=str(tmp_path)) == 0
